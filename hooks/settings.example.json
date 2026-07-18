@@ -1,0 +1,35 @@
+{
+  "//": "MANUAL FALLBACK. `bun install` (or `bun run setup`) wires these globally for you via hooks/install_hooks.py. Only copy by hand if you want to customize.",
+  "//copy": "Copy these hooks into your project's .claude/settings.json (or ~/.claude/settings.json).",
+  "//source-app": "Change --source-app to name this project/agent in the dashboard (the installer omits it so each project auto-labels by folder name).",
+  "//path": "Adjust the absolute path to send_event.py.",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/code/agentglass/hooks/send_event.py --source-app my-project --event-type SessionStart" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/code/agentglass/hooks/send_event.py --source-app my-project --event-type UserPromptSubmit" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "python3 ~/code/agentglass/hooks/send_event.py --source-app my-project --event-type PreToolUse" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "python3 ~/code/agentglass/hooks/send_event.py --source-app my-project --event-type PostToolUse" }] }
+    ],
+    "Notification": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/code/agentglass/hooks/send_event.py --source-app my-project --event-type Notification" }] }
+    ],
+    "SubagentStop": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/code/agentglass/hooks/send_event.py --source-app my-project --event-type SubagentStop --add-chat" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/code/agentglass/hooks/send_event.py --source-app my-project --event-type Stop --add-chat" }] }
+    ],
+    "PreCompact": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/code/agentglass/hooks/send_event.py --source-app my-project --event-type PreCompact" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/code/agentglass/hooks/send_event.py --source-app my-project --event-type SessionEnd --add-chat" }] }
+    ]
+  }
+}

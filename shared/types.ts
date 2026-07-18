@@ -1,0 +1,433 @@
+// Shared event + analytics contract between server and web.
+// Keep this file dependency-free so both sides can import it.
+
+export type HookEventType =
+  | "SessionStart"
+  | "SessionEnd"
+  | "UserPromptSubmit"
+  | "PreToolUse"
+  | "PostToolUse"
+  | "PostToolUseFailure"
+  | "PermissionRequest"
+  | "Notification"
+  | "SubagentStart"
+  | "SubagentStop"
+  | "Stop"
+  | "PreCompact";
+
+/** Raw payload posted by the Claude Code hook. */
+export interface IngestBody {
+  source_app: string;
+  session_id: string;
+  hook_event_type: HookEventType | string;
+  payload?: Record<string, unknown>;
+  /** Optional transcript array (assistant/user messages with `usage`). */
+  chat?: unknown[];
+  summary?: string;
+  model_name?: string;
+  timestamp?: number; // ms; server stamps if absent
+}
+
+/** A normalized, stored event as returned by the API / WS. */
+export interface WatchEvent {
+  id: number;
+  source_app: string;
+  session_id: string;
+  hook_event_type: string;
+  tool_name: string | null;
+  tool_use_id: string | null;
+  agent_id: string | null;
+  agent_type: string | null;
+  model_name: string | null;
+  is_error: number; // 0 | 1
+  error_text: string | null;
+  duration_ms: number | null; // filled on PostToolUse via pre→post pairing
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  cost_usd: number;
+  summary: string | null;
+  timestamp: number; // ms
+  payload: Record<string, unknown>;
+}
+
+export interface SessionRollup {
+  session_id: string;
+  source_app: string;
+  model_name: string | null;
+  started_at: number;
+  ended_at: number | null;
+  last_seen: number;
+  event_count: number;
+  tool_count: number;
+  error_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  cost_usd: number;
+}
+
+export interface CostByModel {
+  model_name: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  cost_usd: number;
+  sessions: number;
+}
+
+export interface ToolLatencyStat {
+  tool_name: string;
+  calls: number;
+  errors: number;
+  p50_ms: number;
+  p95_ms: number;
+  max_ms: number;
+  avg_ms: number;
+  total_ms: number;
+}
+
+export interface TimeBucket {
+  t: number; // bucket start, ms
+  events: number;
+  errors: number;
+  cost_usd: number;
+  tokens: number;
+}
+
+export interface SkillUsage {
+  skill: string;
+  calls: number;
+  /** Cost attributed to this skill (events charged to the running skill). */
+  cost_usd: number;
+  last_used: number;
+  /** Run counts across the window, oldest bucket first. */
+  buckets: number[];
+}
+
+export interface AppUsage {
+  source_app: string;
+  events: number;
+  sessions: number;
+  tool_calls: number;
+  cost_usd: number;
+  tokens: number;
+}
+
+export interface TypeCount {
+  hook_event_type: string;
+  count: number;
+}
+
+/** A skill or slash-command discovered on disk, joined with its recorded usage. */
+export interface SkillInfo {
+  name: string;
+  kind: "skill" | "command";
+  description: string;
+  argument_hint: string | null;
+  /** Canonical origin: "user" or the project dir name (e.g. "shop-api"). */
+  source: string;
+  /** How many locations define it (worktree copies collapse into one entry). */
+  copies: number;
+  path: string;
+  /** When the skill was ADDED: git first-commit date where available,
+   *  otherwise the oldest file mtime across copies (checkout mtimes cluster,
+   *  so git dates are strongly preferred for "newest" sorting). */
+  added: number;
+  /** Runs recorded in the events DB (bounded by retention). */
+  calls: number;
+  last_used: number | null;
+  /** Cost attributed to this skill's runs (bounded by retention). */
+  cost_usd: number;
+  /** Derived grouping for discovery (e.g. "testing & QA", "PRs & review"). */
+  category: string;
+  /** The "Use when…" sentence extracted from the description, if present. */
+  when_to_use: string | null;
+}
+
+export interface StatsSummary {
+  totals: {
+    events: number;
+    sessions: number;
+    tool_calls: number;
+    errors: number;
+    cost_usd: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_tokens: number;
+    cache_read_tokens: number;
+  };
+  by_model: CostByModel[];
+  tool_latency: ToolLatencyStat[];
+  timeline: TimeBucket[];
+  top_skills: SkillUsage[];
+  by_app: AppUsage[];
+  by_type: TypeCount[];
+  /** Event counts by day-of-week × hour (length 168 = 7*24), local time. */
+  heatmap: number[];
+  window_ms: number;
+}
+
+/** A tool call held at the gate, awaiting a remote approve/deny. */
+export interface PendingGate {
+  id: string;
+  source_app: string;
+  session_id: string;
+  tool_name: string;
+  summary: string;
+  created: number;
+}
+
+export interface SearchHit {
+  id: number;
+  timestamp: number;
+  source_app: string;
+  session_id: string;
+  hook_event_type: string;
+  tool_name: string | null;
+  cost_usd: number;
+  duration_ms: number | null;
+  /** snippet with \x01…\x02 wrapping the matched terms */
+  snippet: string;
+}
+
+export interface Insight {
+  id: string;
+  severity: "info" | "warn" | "bad";
+  kind: "loop" | "spend" | "errors" | "burn";
+  title: string;
+  detail: string;
+  session: string | null; // "source_app:session8"
+  ts: number;
+}
+
+export interface DiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[]; // each begins with " ", "+" or "-"
+}
+export interface SessionDetail {
+  session_id: string;
+  source_app: string;
+  model_name: string | null;
+  started_at: number;
+  ended_at: number | null;
+  last_seen: number;
+  events: number;
+  tools: number;
+  errors: number;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  summary: string | null;
+  tool_mix: { tool: string; n: number }[];
+  subagents: { agent_id: string; agent_type: string; events: number }[];
+  conversation: { role: "user" | "assistant"; text: string; ts: number }[];
+  changes: FileChange[];
+}
+
+export interface FileChange {
+  id: number;
+  timestamp: number;
+  source_app: string;
+  session_id: string;
+  tool: string;
+  file_path: string;
+  additions: number;
+  deletions: number;
+  hunks: DiffHunk[];
+}
+
+/** WebSocket frames. */
+export type WsFrame =
+  | { type: "initial"; data: WatchEvent[] }
+  | { type: "event"; data: WatchEvent }
+  | { type: "session"; data: SessionRollup };
+
+// --- commit composer (live git working-tree) ---------------------------------
+export interface GitFileStatus {
+  path: string; // repo-relative
+  code: string; // raw porcelain XY
+  staged: boolean;
+  unstaged: boolean;
+  status: "modified" | "added" | "deleted" | "renamed" | "copied" | "untracked" | "unmerged" | "type-changed";
+}
+export interface RepoStatus {
+  root: string; // absolute repo top-level
+  branch: string;
+  files: GitFileStatus[];
+  suggested: string[]; // repo-relative paths from the request that are currently dirty
+}
+export interface GitStatusResponse {
+  repos: RepoStatus[];
+  commitEnabled: boolean;
+}
+export interface CommitResult {
+  ok: boolean;
+  sha?: string;
+  shortSha?: string;
+  summary?: string; // e.g. "3 files, +40 −5"
+  error?: string;
+}
+
+// --- live git panel (working tree, replacing lazygit) ------------------------
+/** A working-tree diff, shaped as a FileChange so the diff renderer is reused. */
+export interface GitFileChange extends FileChange {
+  status: GitFileStatus["status"];
+  staged: boolean;
+  binary: boolean;
+  oldPath?: string; // absolute, set for renames
+}
+export interface GitBranchInfo {
+  name: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  detached: boolean;
+}
+export interface WorkingTree {
+  root: string;
+  branch: GitBranchInfo;
+  staged: GitFileChange[];
+  unstaged: GitFileChange[]; // modified + untracked (untracked rendered as all-added)
+  clean: boolean;
+  writeEnabled: boolean;
+  error?: string;
+}
+/** A repo agentglass knows about (from telemetry paths + the server's own cwd). */
+export interface GitRepoRef {
+  root: string;
+  name: string;
+  branch: string;
+  dirty: number; // count of changed files
+  ahead: number;
+  behind: number;
+}
+export interface GitActionResult {
+  ok: boolean;
+  error?: string;
+  output?: string;
+}
+export interface GitBranch {
+  name: string;
+  current: boolean;
+  upstream: string | null;
+  track: string; // raw "[ahead 4, behind 53]" / "[gone]" / ""
+  date: string;  // committerdate, relative
+  subject: string;
+}
+export interface GitCommit {
+  hash: string;
+  shortHash: string;
+  subject: string;
+  author: string;
+  date: string; // relative, e.g. "3 hours ago"
+  refs: string; // decorations
+}
+/** One rendered row of `git log --graph`: the graph glyphs, plus commit fields
+ *  when the row is a commit (graph-only connector rows have no hash). */
+export interface GitGraphLine {
+  graph: string;
+  hash?: string;
+  author?: string;
+  date?: string;
+  subject?: string;
+  refs?: string;
+}
+export interface GitStash {
+  index: number;
+  ref: string; // stash@{N}
+  message: string;
+}
+export interface GitWorktree {
+  path: string;    // absolute
+  branch: string;  // branch short name, or "(detached)"
+  head: string;    // short sha
+  current: boolean;
+  bare: boolean;
+  locked: boolean;
+}
+
+// --- live docker panel (lazydocker replacement) ------------------------------
+export interface DockerContainer {
+  id: string;        // short id
+  name: string;
+  image: string;
+  state: string;     // running | exited | paused | created | restarting | dead
+  status: string;    // "Up 4 hours" / "Exited (0) 2 hours ago"
+  ports: string;
+  project: string | null; // compose project
+  service: string | null; // compose service
+  runningFor: string;
+  size: string;
+}
+export interface DockerStat {
+  id: string;
+  cpu: number;       // percent
+  mem: number;       // percent
+  memUsage: string;
+  netIO: string;
+  blockIO: string;
+  pids: number;
+}
+export interface DockerImage {
+  id: string;
+  repository: string;
+  tag: string;
+  size: string;
+  created: string;   // "5 hours ago"
+  containers: string;
+  dangling: boolean;
+}
+export interface DockerVolume { name: string; driver: string; }
+export interface DockerNetwork { id: string; name: string; driver: string; scope: string; }
+export interface DockerOverview {
+  available: boolean;
+  writeEnabled: boolean;
+  version: string | null;
+  containers: DockerContainer[];
+  images: DockerImage[];
+  volumes: DockerVolume[];
+  networks: DockerNetwork[];
+  error?: string;
+}
+export interface DockerActionResult { ok: boolean; error?: string; output?: string; }
+
+// --- LLM walkthrough (AI-authored review itinerary) --------------------------
+export interface WalkthroughInputFile {
+  path: string;
+  tool?: string;
+  additions?: number;
+  deletions?: number;
+  patch?: string; // unified diff text (source of truth stays the telemetry/git diff)
+}
+export interface WalkthroughFile {
+  path: string;
+  description: string; // one-line, LLM-authored
+  tag: string; // feature | fix | refactor | test | docs | config | style | chore
+}
+export interface WalkthroughResult {
+  available: boolean;
+  reviewFocus: string;
+  files: WalkthroughFile[];
+  error?: string;
+}
+
+// --- in-browser terminal (real PTY shell per repo/worktree) ------------------
+/** A ready-to-run project command surfaced in the terminal panel. */
+export interface ProjectCommand {
+  name: string; // target/script name
+  cmd: string;  // exact command to run, e.g. "make test" / "bun run dev"
+  desc: string; // what it does — from `## comment`, `# comment` above, or the script body
+  dir: string;  // repo-relative folder the Makefile/package.json lives in ("" = repo root)
+}
+export interface TerminalCommands {
+  enabled: boolean; // AGENTGLASS_TERMINAL_DISABLED gate
+  make: ProjectCommand[];    // Makefile targets, with descriptions
+  scripts: ProjectCommand[]; // package.json scripts, runner-aware
+}

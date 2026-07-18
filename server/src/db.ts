@@ -1,0 +1,827 @@
+import { Database } from "bun:sqlite";
+import { existsSync, mkdirSync, chmodSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import type {
+  WatchEvent,
+  SessionRollup,
+  StatsSummary,
+  CostByModel,
+  ToolLatencyStat,
+  TimeBucket,
+  SkillUsage,
+  AppUsage,
+  TypeCount,
+} from "../../shared/types.ts";
+import type { NormalizedEvent } from "./ingest.ts";
+import { costUsd, modelLabel } from "./pricing.ts";
+
+/**
+ * Where the database lives.
+ *
+ * A relative path resolves against the working directory, which is fine when
+ * the server is started from the repo but not when it's launched from a
+ * desktop icon — the cwd is then arbitrary, and each launch would quietly
+ * start a fresh database somewhere new. Fall back to the XDG data dir so the
+ * history is the same no matter how the server was started. An explicit
+ * AGENTGLASS_DB still wins, and a plain `bun run dev` in a checkout keeps
+ * using the local file if one is already there.
+ */
+function defaultDbPath(): string {
+  const local = resolve("agentglass.db");
+  if (existsSync(local)) return local;
+  const base =
+    process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+  const dir = join(base, "agentglass");
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return join(dir, "agentglass.db");
+  } catch {
+    return local; // unwritable data dir — better a local file than no database
+  }
+}
+
+const DB_PATH = process.env.AGENTGLASS_DB || defaultDbPath();
+const db = new Database(DB_PATH, { create: true });
+// The DB holds full prompts, file contents and command output in cleartext.
+// Default file perms (0644) leave it world-readable; only $HOME being 0700
+// keeps other local users out, which isn't a guarantee (a synced or shared
+// home, a container mount). Lock the file — and the WAL/SHM that carry recent
+// rows — to the owner.
+for (const suffix of ["", "-wal", "-shm"]) {
+  try { chmodSync(DB_PATH + suffix, 0o600); } catch { /* not created yet — created 0600 once WAL kicks in */ }
+}
+db.exec("PRAGMA journal_mode = WAL;");
+db.exec("PRAGMA foreign_keys = ON;");
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_app TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  hook_event_type TEXT NOT NULL,
+  tool_name TEXT,
+  tool_use_id TEXT,
+  agent_id TEXT,
+  agent_type TEXT,
+  model_name TEXT,
+  is_error INTEGER NOT NULL DEFAULT 0,
+  error_text TEXT,
+  duration_ms INTEGER,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  summary TEXT,
+  payload TEXT NOT NULL DEFAULT '{}',
+  timestamp INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_source ON events(source_app);
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(hook_event_type);
+CREATE INDEX IF NOT EXISTS idx_events_tool ON events(tool_name);
+CREATE INDEX IF NOT EXISTS idx_events_tooluse ON events(tool_use_id);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  session_id TEXT PRIMARY KEY,
+  source_app TEXT NOT NULL,
+  model_name TEXT,
+  provider TEXT,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  last_seen INTEGER NOT NULL,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  tool_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_seen ON sessions(last_seen);
+
+-- Full-text index: one searchable blob per event (rowid = events.id) covering
+-- prompts, commands, file paths, assistant messages and errors.
+CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(text);
+`);
+
+// `provider` was added after v1. CREATE TABLE IF NOT EXISTS won't add it to a
+// pre-existing sessions table, so ALTER it in before any statement referencing
+// it is prepared. Harmless (throws "duplicate column") once it already exists.
+try { db.exec("ALTER TABLE sessions ADD COLUMN provider TEXT"); } catch { /* already present */ }
+
+/** Coarse vendor for a model name — the provider dimension. Returns null for an
+ *  unknown/absent model so a session's known provider is never overwritten.
+ *  Kept in sync with the web's providerOf() in web/src/lib/format.ts. */
+export function providerOf(model: string | null | undefined): string | null {
+  if (!model) return null;
+  const m = model.toLowerCase();
+  if (/opus|sonnet|haiku|fable|claude|anthropic/.test(m)) return "Anthropic";
+  if (/gpt|davinci|openai|\bo1\b|\bo3\b|\bo4\b/.test(m)) return "OpenAI";
+  if (/gemini|palm|bison|flash|google|vertex/.test(m)) return "Google";
+  if (/deepseek/.test(m)) return "DeepSeek";
+  if (/grok|xai/.test(m)) return "xAI";
+  if (/mistral|mixtral|codestral/.test(m)) return "Mistral";
+  if (/llama|meta-/.test(m)) return "Meta";
+  if (/command|cohere/.test(m)) return "Cohere";
+  return null;
+}
+
+/** SQL fragment + args to scope an events query to one provider (via its
+ *  sessions). Empty when no provider is selected. */
+function providerScope(provider?: string | null): { clause: string; args: string[] } {
+  return provider
+    ? { clause: " AND session_id IN (SELECT session_id FROM sessions WHERE provider = ?)", args: [provider] }
+    : { clause: "", args: [] };
+}
+
+/** The searchable text blob for an event — the fleet's collective memory. */
+export function ftsText(n: {
+  source_app: string;
+  session_id: string;
+  hook_event_type: string;
+  tool_name: string | null;
+  error_text: string | null;
+  payload?: Record<string, unknown>;
+}): string {
+  const p = (n.payload ?? {}) as any;
+  const ti = (p.tool_input ?? {}) as any;
+  return [
+    n.source_app, n.session_id, n.hook_event_type, n.tool_name, n.error_text,
+    ti.command, ti.file_path || ti.path, ti.query || ti.pattern, ti.description, ti.prompt,
+    p.prompt, p.message, p.last_assistant_message,
+  ].filter((s) => typeof s === "string" && s).join(" \n ").slice(0, 8000);
+}
+
+const ftsInsert = db.query("INSERT INTO events_fts(rowid, text) VALUES ($id, $text)");
+
+const insertStmt = db.query(`
+  INSERT INTO events (
+    source_app, session_id, hook_event_type, tool_name, tool_use_id,
+    agent_id, agent_type, model_name, is_error, error_text, duration_ms,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    cost_usd, summary, payload, timestamp
+  ) VALUES (
+    $source_app, $session_id, $hook_event_type, $tool_name, $tool_use_id,
+    $agent_id, $agent_type, $model_name, $is_error, $error_text, $duration_ms,
+    $input_tokens, $output_tokens, $cache_creation_tokens, $cache_read_tokens,
+    $cost_usd, $summary, $payload, $timestamp
+  ) RETURNING id
+`);
+
+// Find the matching PreToolUse for a Post event: by tool_use_id when present,
+// otherwise the most recent unpaired Pre for the same session+tool.
+const findPreById = db.query<{ timestamp: number }, [string]>(
+  `SELECT timestamp FROM events
+   WHERE hook_event_type = 'PreToolUse' AND tool_use_id = ?
+   ORDER BY id DESC LIMIT 1`
+);
+const findPreByTool = db.query<{ timestamp: number }, [string, string, number]>(
+  `SELECT timestamp FROM events
+   WHERE hook_event_type = 'PreToolUse' AND session_id = ? AND tool_name = ?
+     AND timestamp <= ?
+   ORDER BY id DESC LIMIT 1`
+);
+
+interface SessionTokenRow {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  model_name: string | null;
+}
+const getSessionTokens = db.query<SessionTokenRow, [string]>(
+  `SELECT input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, model_name
+   FROM sessions WHERE session_id = ?`
+);
+
+const rowToEvent = db.query<any, [number]>(`SELECT * FROM events WHERE id = ?`);
+
+function parseEventRow(r: any): WatchEvent {
+  return {
+    ...r,
+    payload: safeJson(r.payload),
+  } as WatchEvent;
+}
+
+function safeJson(s: string): Record<string, unknown> {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return {};
+  }
+}
+
+const isToolPost = (t: string) => t === "PostToolUse" || t === "PostToolUseFailure";
+const isTerminal = (t: string) => t === "Stop" || t === "SessionEnd" || t === "SubagentStop";
+
+// ---------------------------------------------------------------------------
+// Retention — keep at least a full week of history so the 7d window is always
+// answerable. Prune anything older than AGENTGLASS_RETENTION_DAYS (default 8;
+// 0 disables pruning entirely).
+// ---------------------------------------------------------------------------
+export const RETENTION_DAYS = Math.max(0, Number(process.env.AGENTGLASS_RETENTION_DAYS ?? 8));
+
+export function pruneOldRows(): { events: number; sessions: number } {
+  if (!RETENTION_DAYS) return { events: 0, sessions: 0 };
+  const cutoff = Date.now() - RETENTION_DAYS * 86_400_000;
+  db.run(`DELETE FROM events_fts WHERE rowid IN (SELECT id FROM events WHERE timestamp < ?)`, [cutoff]);
+  const ev = db.run(`DELETE FROM events WHERE timestamp < ?`, [cutoff]);
+  const se = db.run(`DELETE FROM sessions WHERE last_seen < ?`, [cutoff]);
+  return { events: ev.changes, sessions: se.changes };
+}
+
+export interface InsertResult {
+  event: WatchEvent;
+  session: SessionRollup;
+}
+
+/**
+ * Insert a normalized event, computing:
+ *  - per-event token DELTA (from cumulative transcript usage) + cost
+ *  - PostToolUse latency via pre→post pairing
+ *  - the updated session rollup (authoritative token/cost totals)
+ */
+export function insertEvent(n: NormalizedEvent): InsertResult {
+  const model = n.model_name;
+
+  // --- token delta computation -------------------------------------------
+  let dIn = n.usage.input_tokens ?? 0;
+  let dOut = n.usage.output_tokens ?? 0;
+  let dCw = n.usage.cache_creation_tokens ?? 0;
+  let dCr = n.usage.cache_read_tokens ?? 0;
+
+  const prior = getSessionTokens.get(n.session_id);
+  if (n.usage_is_cumulative && prior) {
+    // cumulative transcript → delta vs what the session already recorded
+    dIn = Math.max(0, dIn - prior.input_tokens);
+    dOut = Math.max(0, dOut - prior.output_tokens);
+    dCw = Math.max(0, dCw - prior.cache_creation_tokens);
+    dCr = Math.max(0, dCr - prior.cache_read_tokens);
+  }
+  const eventCost = costUsd(
+    { input_tokens: dIn, output_tokens: dOut, cache_creation_tokens: dCw, cache_read_tokens: dCr },
+    model
+  );
+
+  // --- latency pairing ----------------------------------------------------
+  let duration_ms: number | null = null;
+  if (isToolPost(n.hook_event_type)) {
+    let pre: { timestamp: number } | null = null;
+    if (n.tool_use_id) pre = findPreById.get(n.tool_use_id) ?? null;
+    if (!pre && n.tool_name) pre = findPreByTool.get(n.session_id, n.tool_name, n.timestamp) ?? null;
+    if (pre) duration_ms = Math.max(0, n.timestamp - pre.timestamp);
+  }
+
+  const { id } = insertStmt.get({
+    $source_app: n.source_app,
+    $session_id: n.session_id,
+    $hook_event_type: n.hook_event_type,
+    $tool_name: n.tool_name,
+    $tool_use_id: n.tool_use_id,
+    $agent_id: n.agent_id,
+    $agent_type: n.agent_type,
+    $model_name: model,
+    $is_error: n.is_error,
+    $error_text: n.error_text,
+    $duration_ms: duration_ms,
+    $input_tokens: dIn,
+    $output_tokens: dOut,
+    $cache_creation_tokens: dCw,
+    $cache_read_tokens: dCr,
+    $cost_usd: eventCost,
+    $summary: n.summary,
+    $payload: JSON.stringify(n.payload ?? {}),
+    $timestamp: n.timestamp,
+  }) as { id: number };
+
+  const event = parseEventRow(rowToEvent.get(id));
+  try { ftsInsert.run({ $id: id, $text: ftsText({ ...n, payload: n.payload }) }); } catch { /* fts best-effort */ }
+  const session = upsertSession(n, dIn, dOut, dCw, dCr);
+  return { event, session };
+}
+
+const upsertStmt = db.query(`
+  INSERT INTO sessions (
+    session_id, source_app, model_name, provider, started_at, ended_at, last_seen,
+    event_count, tool_count, error_count,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd
+  ) VALUES (
+    $sid, $src, $model, $provider, $ts, $ended, $ts,
+    1, $tool, $err,
+    $in, $out, $cw, $cr, $cost
+  )
+  ON CONFLICT(session_id) DO UPDATE SET
+    source_app = excluded.source_app,
+    model_name = COALESCE(excluded.model_name, sessions.model_name),
+    provider = COALESCE(excluded.provider, sessions.provider),
+    ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
+    last_seen = excluded.last_seen,
+    event_count = sessions.event_count + 1,
+    tool_count = sessions.tool_count + $tool,
+    error_count = sessions.error_count + $err,
+    input_tokens = sessions.input_tokens + $in,
+    output_tokens = sessions.output_tokens + $out,
+    cache_creation_tokens = sessions.cache_creation_tokens + $cw,
+    cache_read_tokens = sessions.cache_read_tokens + $cr,
+    cost_usd = sessions.cost_usd + $cost
+  RETURNING *
+`);
+
+function upsertSession(
+  n: NormalizedEvent,
+  dIn: number,
+  dOut: number,
+  dCw: number,
+  dCr: number
+): SessionRollup {
+  const cost = costUsd(
+    { input_tokens: dIn, output_tokens: dOut, cache_creation_tokens: dCw, cache_read_tokens: dCr },
+    n.model_name
+  );
+  const row = upsertStmt.get({
+    $sid: n.session_id,
+    $src: n.source_app,
+    $model: n.model_name,
+    $provider: providerOf(n.model_name),
+    $ts: n.timestamp,
+    $ended: isTerminal(n.hook_event_type) ? n.timestamp : null,
+    $tool: isToolPost(n.hook_event_type) ? 1 : 0,
+    $err: n.is_error,
+    $in: dIn,
+    $out: dOut,
+    $cw: dCw,
+    $cr: dCr,
+    $cost: cost,
+  }) as SessionRollup;
+  return row;
+}
+
+// ---------------------------------------------------------------------------
+// Read queries
+// ---------------------------------------------------------------------------
+
+// Ordered by timestamp, not id: backfilled history arrives in whatever order
+// the scan walks the disk, so a row's id says when it was *ingested*, not when
+// it happened. Sorting by id would rank a project scanned last above one whose
+// work is genuinely more recent.
+const recentStmt = db.query<any, [number]>(
+  `SELECT * FROM events ORDER BY timestamp DESC, id DESC LIMIT ?`
+);
+export function getRecent(limit = 300, provider?: string): WatchEvent[] {
+  if (!provider) return recentStmt.all(limit).map(parseEventRow).reverse();
+  return db
+    .query<any, any[]>(
+      `SELECT * FROM events WHERE session_id IN (SELECT session_id FROM sessions WHERE provider = ?) ORDER BY timestamp DESC, id DESC LIMIT ?`
+    )
+    .all(provider, limit)
+    .map(parseEventRow)
+    .reverse();
+}
+
+export function getFilterOptions() {
+  const apps = db
+    .query<{ source_app: string }, []>(`SELECT DISTINCT source_app FROM events ORDER BY 1`)
+    .all()
+    .map((r) => r.source_app);
+  const types = db
+    .query<{ hook_event_type: string }, []>(
+      `SELECT DISTINCT hook_event_type FROM events ORDER BY 1`
+    )
+    .all()
+    .map((r) => r.hook_event_type);
+  const models = db
+    .query<{ model_name: string }, []>(
+      `SELECT DISTINCT model_name FROM events WHERE model_name IS NOT NULL ORDER BY 1`
+    )
+    .all()
+    .map((r) => r.model_name);
+  return { source_apps: apps, hook_event_types: types, models };
+}
+
+export function getSessions(limit = 100, provider?: string): SessionRollup[] {
+  const where = provider ? " WHERE provider = ?" : "";
+  const args = provider ? [provider, limit] : [limit];
+  return db
+    .query<SessionRollup, any[]>(`SELECT * FROM sessions${where} ORDER BY last_seen DESC LIMIT ?`)
+    .all(...args);
+}
+
+function percentile(sorted: number[], p: number): number {
+  if (!sorted.length) return 0;
+  const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+  return sorted[idx];
+}
+
+/** Full analytics summary over a rolling window (default 24h), optionally scoped
+ *  to a single provider (Anthropic / OpenAI / Google / …). */
+export function statsSummary(windowMs = 24 * 3600 * 1000, provider?: string): StatsSummary {
+  const since = Date.now() - windowMs;
+  const { clause: pf, args: pa } = providerScope(provider);
+  const A = [since, ...pa]; // bind order: timestamp first, then provider (if any)
+
+  // Totals come from the authoritative sessions table for cost/tokens,
+  // and from events for counts/errors within the window.
+  // One pass, not two: both sets of totals cover exactly the same rows, and
+  // over a wide window each separate pass is a full scan of the table.
+  const totals = db
+    .query<any, any[]>(
+      `SELECT COUNT(*) AS events,
+              SUM(CASE WHEN hook_event_type IN ('PostToolUse','PostToolUseFailure') THEN 1 ELSE 0 END) AS tool_calls,
+              SUM(is_error) AS errors,
+              COUNT(DISTINCT session_id) AS sessions,
+              SUM(input_tokens) AS input_tokens,
+              SUM(output_tokens) AS output_tokens,
+              SUM(cache_creation_tokens) AS cache_creation_tokens,
+              SUM(cache_read_tokens) AS cache_read_tokens,
+              SUM(cost_usd) AS cost_usd
+       FROM events WHERE timestamp >= ?${pf}`
+    )
+    .get(...A)!;
+  const evtTotals = totals as { events: number; tool_calls: number; errors: number };
+  const tokTotals = totals;
+
+  // Per-model breakdown (from events so it respects the window).
+  const modelRows = db
+    .query<any, any[]>(
+      `SELECT model_name,
+              SUM(input_tokens) AS input_tokens,
+              SUM(output_tokens) AS output_tokens,
+              SUM(cache_creation_tokens) AS cache_creation_tokens,
+              SUM(cache_read_tokens) AS cache_read_tokens,
+              SUM(cost_usd) AS cost_usd,
+              COUNT(DISTINCT session_id) AS sessions
+       FROM events WHERE timestamp >= ?${pf}
+       GROUP BY model_name`
+    )
+    .all(...A);
+  const by_model: CostByModel[] = modelRows.map((r) => ({
+    model_name: modelLabel(r.model_name),
+    input_tokens: r.input_tokens ?? 0,
+    output_tokens: r.output_tokens ?? 0,
+    cache_creation_tokens: r.cache_creation_tokens ?? 0,
+    cache_read_tokens: r.cache_read_tokens ?? 0,
+    cost_usd: r.cost_usd ?? 0,
+    sessions: r.sessions ?? 0,
+  }));
+
+  // Tool latency — pull durations per tool and compute percentiles in JS.
+  const durRows = db
+    .query<{ tool_name: string; duration_ms: number; is_error: number }, any[]>(
+      `SELECT tool_name, duration_ms, is_error FROM events
+       WHERE timestamp >= ? AND hook_event_type IN ('PostToolUse','PostToolUseFailure')
+         AND tool_name IS NOT NULL${pf}`
+    )
+    .all(...A);
+  const byTool = new Map<string, { durs: number[]; errors: number; count: number }>();
+  for (const r of durRows) {
+    const e = byTool.get(r.tool_name) ?? { durs: [], errors: 0, count: 0 };
+    e.count++; // every PostToolUse is an invocation, even without a paired duration (e.g. OTLP-logs sources)
+    if (typeof r.duration_ms === "number") e.durs.push(r.duration_ms);
+    if (r.is_error) e.errors++;
+    byTool.set(r.tool_name, e);
+  }
+  const tool_latency: ToolLatencyStat[] = [...byTool.entries()]
+    .map(([tool_name, { durs, errors, count }]) => {
+      const sorted = [...durs].sort((a, b) => a - b);
+      const total = sorted.reduce((a, b) => a + b, 0);
+      return {
+        tool_name,
+        calls: count,
+        errors,
+        p50_ms: percentile(sorted, 50),
+        p95_ms: percentile(sorted, 95),
+        max_ms: sorted.length ? sorted[sorted.length - 1] : 0,
+        avg_ms: sorted.length ? Math.round(total / sorted.length) : 0,
+        total_ms: total,
+      };
+    })
+    .sort((a, b) => b.total_ms - a.total_ms);
+
+  // Most-used skills with attributed cost and per-bucket activity.
+  const top_skills: SkillUsage[] = skillUsageDetail(since, 12, provider).slice(0, 20);
+
+  // Per-app rollup within the window.
+  const by_app: AppUsage[] = db
+    .query<AppUsage, any[]>(
+      `SELECT source_app,
+              COUNT(*) AS events,
+              COUNT(DISTINCT session_id) AS sessions,
+              SUM(CASE WHEN hook_event_type IN ('PostToolUse','PostToolUseFailure') THEN 1 ELSE 0 END) AS tool_calls,
+              SUM(cost_usd) AS cost_usd,
+              SUM(input_tokens + output_tokens) AS tokens
+       FROM events WHERE timestamp >= ?${pf}
+       GROUP BY source_app ORDER BY cost_usd DESC, events DESC`
+    )
+    .all(...A);
+
+  // Event-type mix within the window.
+  const by_type: TypeCount[] = db
+    .query<TypeCount, any[]>(
+      `SELECT hook_event_type, COUNT(*) AS count
+       FROM events WHERE timestamp >= ?${pf}
+       GROUP BY hook_event_type ORDER BY count DESC`
+    )
+    .all(...A);
+
+  // Timeline buckets.
+  const bucketCount = 60;
+  const bucketMs = Math.max(1000, Math.floor(windowMs / bucketCount));
+  const start = Math.floor(since / bucketMs) * bucketMs;
+  const buckets = new Map<number, TimeBucket>();
+  for (let i = 0; i < bucketCount; i++) {
+    const t = start + i * bucketMs;
+    buckets.set(t, { t, events: 0, errors: 0, cost_usd: 0, tokens: 0 });
+  }
+  const tlRows = db
+    .query<any, any[]>(
+      `SELECT timestamp, is_error, cost_usd, input_tokens, output_tokens FROM events WHERE timestamp >= ?${pf}`
+    )
+    .all(...A);
+  const heatmap = new Array(168).fill(0);
+  for (const r of tlRows) {
+    const t = Math.floor(r.timestamp / bucketMs) * bucketMs;
+    const b = buckets.get(t);
+    if (b) {
+      b.events++;
+      b.errors += r.is_error;
+      b.cost_usd += r.cost_usd ?? 0;
+      b.tokens += (r.input_tokens ?? 0) + (r.output_tokens ?? 0);
+    }
+    const d = new Date(r.timestamp);
+    heatmap[d.getDay() * 24 + d.getHours()]++;
+  }
+
+  return {
+    totals: {
+      events: evtTotals.events ?? 0,
+      sessions: tokTotals.sessions ?? 0,
+      tool_calls: evtTotals.tool_calls ?? 0,
+      errors: evtTotals.errors ?? 0,
+      cost_usd: tokTotals.cost_usd ?? 0,
+      input_tokens: tokTotals.input_tokens ?? 0,
+      output_tokens: tokTotals.output_tokens ?? 0,
+      cache_creation_tokens: tokTotals.cache_creation_tokens ?? 0,
+      cache_read_tokens: tokTotals.cache_read_tokens ?? 0,
+    },
+    by_model,
+    tool_latency,
+    timeline: [...buckets.values()].sort((a, b) => a.t - b.t),
+    top_skills,
+    by_app,
+    by_type,
+    heatmap,
+    window_ms: windowMs,
+  };
+}
+
+/**
+ * Per-skill usage detail: run counts, last-used, activity buckets, and an
+ * ATTRIBUTED cost — every cost-bearing event in a session is charged to the
+ * most recent skill invocation at/before it in that session (until the next
+ * skill starts). An approximation, but a useful one: it answers "what does
+ * running /code-review actually cost?".
+ */
+export function skillUsageDetail(since = 0, bucketCount = 12, provider?: string): SkillUsage[] {
+  const { clause: pf, args: pa } = providerScope(provider);
+  const invocations = db
+    .query<{ session_id: string; timestamp: number; skill: string }, any[]>(
+      `SELECT session_id, timestamp, json_extract(payload, '$.tool_input.skill') AS skill
+       FROM events
+       WHERE hook_event_type = 'PreToolUse' AND tool_name = 'Skill'
+         AND json_extract(payload, '$.tool_input.skill') IS NOT NULL AND timestamp >= ?${pf}
+       ORDER BY session_id, timestamp`
+    )
+    .all(since, ...pa);
+  if (!invocations.length) return [];
+
+  const bySession = new Map<string, { timestamp: number; skill: string }[]>();
+  for (const inv of invocations) {
+    const arr = bySession.get(inv.session_id) ?? [];
+    arr.push(inv);
+    bySession.set(inv.session_id, arr);
+  }
+
+  const acc = new Map<string, { calls: number; cost_usd: number; last_used: number; buckets: number[] }>();
+  const get = (skill: string) => {
+    let a = acc.get(skill);
+    if (!a) {
+      a = { calls: 0, cost_usd: 0, last_used: 0, buckets: new Array(bucketCount).fill(0) };
+      acc.set(skill, a);
+    }
+    return a;
+  };
+
+  const start = since || invocations.reduce((m, i) => Math.min(m, i.timestamp), Date.now());
+  const bucketMs = Math.max(1, (Date.now() - start) / bucketCount);
+  for (const inv of invocations) {
+    const a = get(inv.skill);
+    a.calls++;
+    a.last_used = Math.max(a.last_used, inv.timestamp);
+    const idx = Math.min(bucketCount - 1, Math.max(0, Math.floor((inv.timestamp - start) / bucketMs)));
+    a.buckets[idx]++;
+  }
+
+  // Charge each cost-bearing event to the running skill at that moment.
+  const costRows = db
+    .query<{ session_id: string; timestamp: number; cost_usd: number }, [number]>(
+      `SELECT session_id, timestamp, cost_usd FROM events WHERE cost_usd > 0 AND timestamp >= ?`
+    )
+    .all(since);
+  for (const c of costRows) {
+    const invs = bySession.get(c.session_id);
+    if (!invs) continue;
+    let owner: string | null = null;
+    for (const inv of invs) {
+      if (inv.timestamp <= c.timestamp) owner = inv.skill;
+      else break;
+    }
+    if (owner) get(owner).cost_usd += c.cost_usd;
+  }
+
+  return [...acc.entries()]
+    .map(([skill, a]) => ({ skill, ...a }))
+    .sort((a, b) => b.calls - a.calls || b.cost_usd - a.cost_usd);
+}
+
+type ChangeRow = { id: number; timestamp: number; source_app: string; session_id: string; tool_name: string; payload: string };
+/**
+ * A hunk for tools that report an edit as a pair of strings rather than a patch.
+ *
+ * The two strings usually share long identical regions — that's how Edit
+ * locates its match — so emitting every old line as a deletion and every new
+ * line as an addition counts unchanged context as churn (measured 1.6x on
+ * additions, 3.8x on deletions across real edits). The common prefix and
+ * suffix are kept as context lines instead, which also gives the hunk an
+ * honest size.
+ */
+function editHunk(oldS: string, newS: unknown) {
+  const del = oldS ? oldS.split("\n") : [];
+  const add = typeof newS === "string" && newS ? newS.split("\n") : [];
+
+  let pre = 0;
+  while (pre < del.length && pre < add.length && del[pre] === add[pre]) pre++;
+  let post = 0;
+  while (
+    post < del.length - pre &&
+    post < add.length - pre &&
+    del[del.length - 1 - post] === add[add.length - 1 - post]
+  ) post++;
+
+  const removed = del.slice(pre, del.length - post);
+  const added = add.slice(pre, add.length - post);
+  return {
+    // The real file offset isn't recorded anywhere in the transcript, so the
+    // hunk is anchored at the start of the matched region rather than claiming
+    // a line number it doesn't know.
+    oldStart: 1,
+    oldLines: del.length,
+    newStart: 1,
+    newLines: add.length,
+    lines: [
+      ...del.slice(0, pre).map((l) => " " + l),
+      ...removed.map((l) => "-" + l),
+      ...added.map((l) => "+" + l),
+      ...del.slice(del.length - post).map((l) => " " + l),
+    ],
+  };
+}
+
+function parseChange(r: ChangeRow): import("../../shared/types.ts").FileChange | null {
+  let payload: any;
+  try { payload = JSON.parse(r.payload); } catch { return null; }
+  const tr = payload.tool_response ?? {};
+  const ti = payload.tool_input ?? {};
+  const file_path = tr.filePath || ti.file_path || ti.filePath || "(unknown)";
+  let hunks = Array.isArray(tr.structuredPatch) ? tr.structuredPatch : [];
+  if (!hunks.length && r.tool_name === "Write" && typeof ti.content === "string") {
+    const lines = ti.content.split("\n");
+    hunks = [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: lines.length, lines: lines.map((l: string) => "+" + l) }];
+  }
+  // An Edit read back from a transcript has no structuredPatch — the recorded
+  // result is plain text — so rebuild the hunk from the call's own strings.
+  // Without this every Edit drops out of the change list, which for a session
+  // that edits more than it writes means no diff at all.
+  if (!hunks.length && r.tool_name === "Edit" && typeof ti.old_string === "string") {
+    hunks = [editHunk(ti.old_string, ti.new_string)];
+  }
+  if (!hunks.length && r.tool_name === "MultiEdit" && Array.isArray(ti.edits)) {
+    hunks = ti.edits
+      .filter((e: any) => e && typeof e.old_string === "string")
+      .map((e: any) => editHunk(e.old_string, e.new_string));
+  }
+  if (!hunks.length) return null;
+  let additions = 0, deletions = 0;
+  for (const h of hunks) for (const l of h.lines ?? []) {
+    if (l[0] === "+") additions++;
+    else if (l[0] === "-") deletions++;
+  }
+  return { id: r.id, timestamp: r.timestamp, source_app: r.source_app, session_id: r.session_id, tool: r.tool_name, file_path, additions, deletions, hunks };
+}
+
+/** Recent file changes (Edit/Write/MultiEdit) with their diff hunks, parsed
+ *  from the tool_response.structuredPatch Claude Code already provides. */
+export function getChanges(limit = 200, sessionId?: string): import("../../shared/types.ts").FileChange[] {
+  const rows = sessionId
+    ? db.query<ChangeRow, [string, number]>(
+        `SELECT id, timestamp, source_app, session_id, tool_name, payload FROM events
+         WHERE hook_event_type='PostToolUse' AND tool_name IN ('Edit','Write','MultiEdit') AND session_id = ?
+         ORDER BY timestamp DESC, id DESC LIMIT ?`).all(sessionId, limit)
+    : db.query<ChangeRow, [number]>(
+        `SELECT id, timestamp, source_app, session_id, tool_name, payload FROM events
+         WHERE hook_event_type='PostToolUse' AND tool_name IN ('Edit','Write','MultiEdit')
+         ORDER BY timestamp DESC, id DESC LIMIT ?`).all(limit);
+  return rows.map(parseChange).filter((c): c is import("../../shared/types.ts").FileChange => c !== null);
+}
+
+/** Everything we know about one session — the deep-dive. */
+export function getSession(sessionId: string): import("../../shared/types.ts").SessionDetail | null {
+  const roll = db.query<any, [string]>(`SELECT * FROM sessions WHERE session_id = ?`).get(sessionId);
+  const agg = db.query<any, [string]>(
+    `SELECT source_app, MAX(model_name) model_name, MIN(timestamp) started_at, MAX(timestamp) last_seen,
+            COUNT(*) events,
+            SUM(CASE WHEN hook_event_type IN ('PostToolUse','PostToolUseFailure') THEN 1 ELSE 0 END) tools,
+            SUM(is_error) errors, SUM(cost_usd) cost_usd,
+            SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens
+     FROM events WHERE session_id = ?`).get(sessionId);
+  if (!agg || !agg.events) return null;
+
+  const toolMix = db.query<{ tool: string; n: number }, [string]>(
+    `SELECT tool_name tool, COUNT(*) n FROM events
+     WHERE session_id = ? AND hook_event_type='PostToolUse' AND tool_name IS NOT NULL
+     GROUP BY tool_name ORDER BY n DESC LIMIT 12`).all(sessionId);
+
+  const subRows = db.query<{ agent_id: string; agent_type: string; n: number }, [string]>(
+    `SELECT agent_id, MAX(agent_type) agent_type, COUNT(*) n FROM events
+     WHERE session_id = ? AND agent_id IS NOT NULL AND agent_id != ''
+     GROUP BY agent_id ORDER BY n DESC LIMIT 20`).all(sessionId);
+
+  // Conversation: interleave user prompts and assistant messages by time.
+  const convo: { role: "user" | "assistant"; text: string; ts: number }[] = [];
+  for (const r of db.query<{ timestamp: number; payload: string }, [string]>(
+    `SELECT timestamp, payload FROM events WHERE session_id = ? AND hook_event_type='UserPromptSubmit' ORDER BY timestamp DESC LIMIT 12`).all(sessionId)) {
+    try { const p = JSON.parse(r.payload); if (p.prompt) convo.push({ role: "user", text: String(p.prompt).slice(0, 600), ts: r.timestamp }); } catch { /* skip */ }
+  }
+  let lastMsg = "";
+  for (const r of db.query<{ timestamp: number; payload: string }, [string]>(
+    `SELECT timestamp, payload FROM events WHERE session_id = ? AND payload LIKE '%last_assistant_message%' ORDER BY timestamp DESC LIMIT 20`).all(sessionId)) {
+    try {
+      const m = JSON.parse(r.payload).last_assistant_message;
+      if (m && m !== lastMsg) { convo.push({ role: "assistant", text: String(m).slice(0, 600), ts: r.timestamp }); lastMsg = m; }
+    } catch { /* skip */ }
+  }
+  convo.sort((a, b) => b.ts - a.ts);
+  const summary = convo.find((c) => c.role === "assistant")?.text ?? null;
+
+  return {
+    session_id: sessionId,
+    source_app: agg.source_app,
+    model_name: agg.model_name ?? roll?.model_name ?? null,
+    started_at: agg.started_at,
+    ended_at: roll?.ended_at ?? null,
+    last_seen: agg.last_seen,
+    events: agg.events,
+    tools: agg.tools ?? 0,
+    errors: agg.errors ?? 0,
+    cost_usd: agg.cost_usd ?? 0,
+    input_tokens: agg.input_tokens ?? 0,
+    output_tokens: agg.output_tokens ?? 0,
+    summary,
+    tool_mix: toolMix,
+    subagents: subRows.map((s) => ({ agent_id: s.agent_id, agent_type: s.agent_type || "subagent", events: s.n })),
+    conversation: convo.slice(0, 16),
+    changes: getChanges(40, sessionId),
+  };
+}
+
+/** Full-text search across every event's prompts, commands and outputs. */
+export function searchEvents(q: string, limit = 60): import("../../shared/types.ts").SearchHit[] {
+  const match = q.trim().split(/\s+/).map((t) => t.replace(/[^a-zA-Z0-9_]/g, "")).filter(Boolean).map((t) => t + "*").join(" ");
+  if (!match) return [];
+  try {
+    return db
+      .query<any, [string, number]>(
+        `SELECT e.id, e.timestamp, e.source_app, e.session_id, e.hook_event_type, e.tool_name,
+                e.cost_usd, e.duration_ms,
+                snippet(events_fts, 0, char(1), char(2), ' … ', 14) AS snippet
+         FROM events_fts f JOIN events e ON e.id = f.rowid
+         WHERE events_fts MATCH ? ORDER BY rank LIMIT ?`
+      )
+      .all(match, limit);
+  } catch {
+    return [];
+  }
+}
+
+/** Stream rows for export (bounded). */
+export function exportRows(limit = 100_000): WatchEvent[] {
+  return db
+    .query<any, [number]>(`SELECT * FROM events ORDER BY id ASC LIMIT ?`)
+    .all(limit)
+    .map(parseEventRow);
+}
+
+export { db };

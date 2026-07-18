@@ -1,0 +1,157 @@
+// Open chats, held outside React so they survive the panel closing.
+//
+// A conversation is a live thing — a `claude` process streaming into it — so
+// it can't live in component state that unmounts with the panel. Same reasoning
+// as the terminal's session store: the panel is a *view* of these, not their
+// owner. That's also what lets many exist at once instead of one at a time.
+
+import { api } from "./api.ts";
+
+export type ChatMsg = { role: "user" | "assistant"; text: string; tools: string[]; streaming?: boolean };
+
+export type Chat = {
+  id: string;
+  cwd: string;
+  model: string;
+  mode: string;
+  title: string;        // derived from the first message; the tab label
+  messages: ChatMsg[];
+  sessionId: string;    // claude's own id, for resuming
+  sending: boolean;
+  draft: string;        // per-chat, so switching tabs doesn't lose what you typed
+  createdAt: number;
+  abort: AbortController | null;
+  unread: boolean;      // replied while you were looking at another chat
+};
+
+const chats = new Map<string, Chat>();
+const subs = new Set<() => void>();
+let seq = 0;
+
+export const DEFAULT_MODEL = "claude-opus-4-8";
+export const DEFAULT_MODE = "default";
+
+// A cached snapshot, rebuilt only when something actually changes.
+//
+// useSyncExternalStore compares snapshots by identity to decide whether to
+// re-render, so returning a freshly built array on every read would look like
+// an endless stream of changes — React treats that as an infinite loop and
+// tears the tree down. The list is rebuilt on emit instead, which is exactly
+// when it can differ.
+let snapshot: Chat[] = [];
+function rebuild() { snapshot = [...chats.values()].sort((a, b) => a.createdAt - b.createdAt); }
+function emit() { rebuild(); subs.forEach((fn) => fn()); }
+export function subscribe(fn: () => void): () => void { subs.add(fn); return () => subs.delete(fn); }
+
+export const listChats = (): Chat[] => snapshot;
+export const getChat = (id: string): Chat | undefined => chats.get(id);
+export const chatCount = () => chats.size;
+
+export function newChat(cwd: string, model = DEFAULT_MODEL, mode = DEFAULT_MODE): Chat {
+  const id = `c${++seq}-${Date.now().toString(36)}`;
+  const chat: Chat = {
+    id, cwd, model, mode, title: "new chat", messages: [], sessionId: "",
+    sending: false, draft: "", createdAt: Date.now(), abort: null, unread: false,
+  };
+  chats.set(id, chat);
+  emit();
+  return chat;
+}
+
+export function closeChat(id: string) {
+  const c = chats.get(id);
+  if (!c) return;
+  c.abort?.abort(); // a closed tab must not keep a stream running
+  chats.delete(id);
+  emit();
+}
+
+/** Mutate a chat in place and notify. Chats are big and change often while
+ *  streaming; copying the whole list per token would be wasted work. */
+export function update(id: string, fn: (c: Chat) => void) {
+  const c = chats.get(id);
+  if (!c) return;
+  fn(c);
+  emit();
+}
+
+const titleOf = (s: string) => {
+  const t = s.trim().split("\n")[0].slice(0, 48);
+  return t.length ? t : "new chat";
+};
+
+/**
+ * Send a message on a chat and stream the reply into it.
+ *
+ * `activeId` decides whether the reply counts as unread — a chat answering in
+ * the background should say so, and the one on screen shouldn't.
+ */
+export async function send(id: string, text: string, isActive: () => boolean) {
+  const chat = chats.get(id);
+  const msg = text.trim();
+  if (!chat || !msg || chat.sending || !chat.cwd) return;
+
+  update(id, (c) => {
+    if (c.messages.length === 0) c.title = titleOf(msg);
+    c.messages.push({ role: "user", text: msg, tools: [] });
+    c.messages.push({ role: "assistant", text: "", tools: [], streaming: true });
+    c.sending = true;
+    c.draft = "";
+  });
+
+  const ac = new AbortController();
+  update(id, (c) => { c.abort = ac; });
+
+  const onEvent = (o: Record<string, unknown>) => {
+    const t = o.type;
+    if (t === "system" && o.subtype === "init" && typeof o.session_id === "string") {
+      update(id, (c) => { c.sessionId = o.session_id as string; });
+      return;
+    }
+    if (t === "assistant") {
+      const blocks = (((o.message as Record<string, unknown>)?.content) ?? []) as Array<Record<string, unknown>>;
+      update(id, (c) => {
+        const last = c.messages[c.messages.length - 1];
+        if (!last || last.role !== "assistant") return;
+        for (const b of blocks) {
+          if (b.type === "text" && typeof b.text === "string") last.text += b.text;
+          else if (b.type === "tool_use" && typeof b.name === "string") {
+            const inp = (b.input ?? {}) as Record<string, unknown>;
+            const hint = typeof inp.command === "string" ? `: ${inp.command.slice(0, 44)}`
+              : typeof inp.file_path === "string" ? `: ${String(inp.file_path).split("/").pop()}` : "";
+            last.tools.push(String(b.name) + hint);
+          }
+        }
+        if (!isActive()) c.unread = true;
+      });
+    } else if (t === "agx_error") {
+      update(id, (c) => {
+        const last = c.messages[c.messages.length - 1];
+        if (last?.role === "assistant") { last.text += `\n[error] ${String(o.error)}`; last.streaming = false; }
+      });
+    }
+  };
+
+  try {
+    await api.chatStream({ cwd: chat.cwd, message: msg, model: chat.model, mode: chat.mode, resumeId: chat.sessionId }, onEvent, ac.signal);
+  } catch (e) {
+    if (!(e instanceof DOMException && e.name === "AbortError")) {
+      update(id, (c) => {
+        const last = c.messages[c.messages.length - 1];
+        if (last?.role === "assistant") last.text += `\n[error] ${String(e)}`;
+      });
+    }
+  } finally {
+    update(id, (c) => {
+      c.sending = false;
+      c.abort = null;
+      const last = c.messages[c.messages.length - 1];
+      if (last?.role === "assistant") last.streaming = false;
+      if (!isActive()) c.unread = true;
+    });
+  }
+}
+
+export function stop(id: string) {
+  chats.get(id)?.abort?.abort();
+}

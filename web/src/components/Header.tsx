@@ -1,0 +1,362 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { motion, AnimatePresence } from "motion/react";
+import type { ConnState } from "../lib/useLive.ts";
+import { api, IS_DEMO } from "../lib/api.ts";
+import { MOD_KEY } from "../lib/format.ts";
+import { ThemeSwitcher } from "./ThemeSwitcher.tsx";
+import { UsageWidget } from "./UsageWidget.tsx";
+import { Portal } from "./Portal.tsx";
+import { Select } from "./Select.tsx";
+import { autostartEnabled, setAutostart } from "../lib/desktop.ts";
+
+// The long windows matter once history isn't pruned: the transcript scan can
+// backfill months of sessions, and a 7d ceiling would hide most of the fleet.
+const WINDOWS = [
+  { label: "15m", ms: 15 * 60_000 },
+  { label: "1h", ms: 3_600_000 },
+  { label: "6h", ms: 6 * 3_600_000 },
+  { label: "24h", ms: 24 * 3_600_000 },
+  { label: "7d", ms: 7 * 86_400_000 },
+  { label: "30d", ms: 30 * 86_400_000 },
+  { label: "all", ms: 3650 * 86_400_000 },
+];
+
+// Shared by the header's pill-shaped controls (filters, search button).
+const selStyle = { background: "color-mix(in srgb, var(--bg3) 40%, transparent)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)", color: "var(--text2)" };
+
+const svg = { width: 15, height: 15, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+
+function IconBtn({ title, active, onClick, children }: { title: string; active?: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      className="h-8 w-8 grid place-items-center rounded-lg transition-colors"
+      style={{
+        border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)",
+        background: active ? "color-mix(in srgb, var(--primary) 20%, transparent)" : "color-mix(in srgb, var(--bg3) 30%, transparent)",
+        color: active ? "var(--primary-hover)" : "var(--text3)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SkillsIcon() {
+  return (
+    <svg {...svg}>
+      <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
+      <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" />
+    </svg>
+  );
+}
+
+function DiffIcon() {
+  return (
+    <svg {...svg}>
+      <path d="M6 3v12" /><circle cx="6" cy="18" r="2.2" /><path d="M6 15a6 6 0 0 0 6 6" />
+      <circle cx="18" cy="6" r="2.2" /><path d="M18 8v3a6 6 0 0 1-6 6" />
+    </svg>
+  );
+}
+
+function GitIcon() {
+  return (
+    <svg {...svg}>
+      <path d="M12 3v6M12 15v6" /><circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function DockerIcon() {
+  return (
+    <svg {...svg}>
+      <path d="M3 9l9-5 9 5v6l-9 5-9-5z" /><path d="M3 9l9 5 9-5M12 14v6" />
+    </svg>
+  );
+}
+
+function TerminalIcon() {
+  return (
+    <svg {...svg}>
+      <path d="M6 8l3.5 4L6 16" /><path d="M12.5 16.5H18" />
+    </svg>
+  );
+}
+
+function ChatIcon() {
+  return (
+    <svg {...svg}>
+      <path d="M20 4H4v12h5v4l5-4h6z" />
+    </svg>
+  );
+}
+
+/** Overflow menu: secondary actions nested behind one "⋯" button. */
+function MoreMenu({ sound, onSound, onOpenStats, onOpenHelp }: { sound: boolean; onSound: () => void; onOpenStats: () => void; onOpenHelp: () => void }) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [pos, setPos] = useState({ top: 0, right: 0 });
+
+  useLayoutEffect(() => {
+    if (open && btnRef.current) {
+      const r = btnRef.current.getBoundingClientRect();
+      setPos({ top: r.bottom + 8, right: window.innerWidth - r.right });
+    }
+  }, [open]);
+
+  // Launch-at-login is a property of the installed app, so the entry only
+  // exists in the desktop window — and only once the shell has confirmed the
+  // current state, rather than showing a toggle that might be lying.
+  const [autostart, setAutostartState] = useState<boolean | null>(null);
+  useEffect(() => { autostartEnabled().then(setAutostartState); }, []);
+  const toggleAutostart = async () => {
+    const next = await setAutostart(!autostart);
+    if (next !== null) setAutostartState(next);
+  };
+
+  const items: { label: string; hint?: string; onClick?: () => void; href?: string; download?: string }[] = [
+    { label: "📊 Statistics", hint: "s", onClick: onOpenStats },
+    { label: "❔ Legend & shortcuts", hint: "?", onClick: onOpenHelp },
+    { label: sound ? "🔊 Alert sounds — on" : "🔇 Alert sounds — off", onClick: onSound },
+    ...(autostart === null
+      ? []
+      : [{ label: autostart ? "🚀 Start at login — on" : "🚀 Start at login — off", onClick: toggleAutostart }]),
+    { label: "↓ Events CSV", href: api.exportUrl("csv"), download: "agentglass-events.csv" },
+    { label: "↓ Events JSON", href: api.exportUrl("json"), download: "agentglass-events.json" },
+    { label: "↓ Skills catalog (md)", href: api.skillsExportUrl(), download: "agentglass-skills.md" },
+  ];
+
+  return (
+    <>
+      <button ref={btnRef} title="More — stats, help, sounds, exports" onClick={() => setOpen((o) => !o)}
+        className="h-8 w-8 grid place-items-center rounded-lg text-[15px]"
+        style={{
+          border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)",
+          background: open ? "color-mix(in srgb, var(--primary) 20%, transparent)" : "color-mix(in srgb, var(--bg3) 30%, transparent)",
+          color: open ? "var(--primary-hover)" : "var(--text3)",
+        }}>
+        ⋯
+      </button>
+      <Portal>
+        <AnimatePresence>
+          {open && (
+            <>
+              <div className="fixed inset-0" style={{ zIndex: 9998 }} onClick={() => setOpen(false)} />
+              <motion.div
+                initial={{ opacity: 0, y: -8, scale: 0.96 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -8, scale: 0.96 }}
+                transition={{ type: "spring", stiffness: 420, damping: 32 }}
+                className="fixed w-56 p-1.5 rounded-xl flex flex-col gap-0.5"
+                style={{
+                  top: pos.top, right: pos.right, zIndex: 9999,
+                  background: "color-mix(in srgb, var(--bg2) 97%, black)",
+                  border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+                  boxShadow: "0 24px 60px -18px rgba(0,0,0,0.7)",
+                  backdropFilter: "blur(18px)",
+                }}
+              >
+                {items.map((it) =>
+                  it.href ? (
+                    <a key={it.label} href={it.href} download={it.download} onClick={() => setOpen(false)}
+                      className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[11.5px] t-dim hover:bg-white/5">
+                      {it.label}
+                    </a>
+                  ) : (
+                    <button key={it.label} onClick={() => { it.onClick?.(); setOpen(false); }}
+                      className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[11.5px] t-dim text-left hover:bg-white/5">
+                      <span>{it.label}</span>
+                      {it.hint && <kbd className="chip text-[9px] t-dim2">{it.hint}</kbd>}
+                    </button>
+                  )
+                )}
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+      </Portal>
+    </>
+  );
+}
+
+export function Header({
+  conn, windowMs, onWindow, apps, types, providers, filter, onFilter, theme, onTheme,
+  sound, onSound, onOpenPalette, onOpenHelp, onOpenStats, onOpenSkills, onOpenChanges, onOpenGit, onOpenDocker, onOpenTerminal, onOpenChat, onClear, showUsage,
+  workspace, onOpenProject,
+}: {
+  conn: ConnState;
+  windowMs: number;
+  onWindow: (ms: number) => void;
+  apps: string[];
+  types: string[];
+  providers: string[];
+  filter: { app: string; type: string; provider: string };
+  onFilter: (f: { app: string; type: string; provider: string }) => void;
+  theme: string;
+  onTheme: (id: string) => void;
+  sound: boolean;
+  onSound: () => void;
+  onOpenPalette: () => void;
+  onOpenHelp: () => void;
+  onOpenStats: () => void;
+  onOpenSkills: () => void;
+  onOpenChanges: () => void;
+  onOpenGit: () => void;
+  onOpenDocker: () => void;
+  onOpenTerminal: () => void;
+  onOpenChat: () => void;
+  onClear: () => void;
+  showUsage: boolean;
+  workspace: string | null;
+  onOpenProject: () => void;
+}) {
+  const live = conn === "open";
+  const hasFilter = filter.app || filter.type || filter.provider;
+
+  return (
+    <header className="flex items-center gap-3 px-4 py-2.5 shrink-0 relative z-20"
+      style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", background: "color-mix(in srgb, var(--bg2) 94%, var(--bg))" }}>
+      <div className="flex items-center gap-2.5 shrink-0">
+        <motion.span initial={{ rotate: -20, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} transition={{ type: "spring", stiffness: 200 }} className="text-xl">🛰</motion.span>
+        <div className="leading-none">
+          <div className="text-[16px] font-bold tracking-tight" style={{ color: "var(--text)" }}>agentglass</div>
+          {/* Scoped to one project → say which — and make it the way to switch:
+              the name IS the project picker. */}
+          <button onClick={onOpenProject} className="hidden sm:flex items-center gap-1 text-[10px] hover:opacity-80"
+            title={workspace ? `${workspace}\nclick to switch project` : "click to open a project — the cockpit scopes itself to its folder"}>
+            {workspace
+              ? <span className="truncate" style={{ color: "var(--primary-hover)", maxWidth: 260 }}>⌂ {workspace.split("/").pop()}</span>
+              : <span className="t-dim2">⌂ pick a project</span>}
+            <span className="t-dim2">▾</span>
+          </button>
+        </div>
+        <span className="flex items-center gap-1.5 ml-1 px-2 py-0.5 rounded-full text-[10px] font-semibold"
+          style={{ color: live ? "var(--success)" : "var(--warning)", background: `color-mix(in srgb, ${live ? "var(--success)" : "var(--warning)"} 14%, transparent)` }}>
+          <span className="relative flex h-1.5 w-1.5">
+            {live && <span className="absolute inline-flex h-full w-full rounded-full opacity-70" style={{ background: "var(--success)", animation: "ping-ring 1.6s ease-out infinite" }} />}
+            <span className="relative inline-flex rounded-full h-1.5 w-1.5" style={{ background: live ? "var(--success)" : "var(--warning)" }} />
+          </span>
+          {live ? "LIVE" : conn.toUpperCase()}
+        </span>
+        {IS_DEMO && (
+          <a
+            href="https://github.com/SirAllap/agentglass"
+            target="_blank"
+            rel="noreferrer"
+            title="This is a live demo with sample data — nothing here is real. Click for the repo."
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold"
+            style={{ color: "var(--warning)", background: "color-mix(in srgb, var(--warning) 14%, transparent)", border: "1px solid color-mix(in srgb, var(--warning) 40%, transparent)" }}
+          >
+            ✦ DEMO · sample data
+          </a>
+        )}
+      </div>
+
+      {/* Middle zone: fills the free space and scrolls sideways instead of
+          wrapping, so the header stays a single line at any width / zoom. */}
+      <div className="flex items-center gap-2 flex-1 min-w-0 overflow-x-auto agw-noscrollbar">
+      <div className="flex items-center gap-0.5 p-0.5 rounded-lg shrink-0" style={{ background: "color-mix(in srgb, var(--bg3) 35%, transparent)" }}>
+        {WINDOWS.map((w) => (
+          <button key={w.label} onClick={() => onWindow(w.ms)} className="px-2 py-1 rounded-md text-[11px] transition-all"
+            style={windowMs === w.ms ? { background: "color-mix(in srgb, var(--primary) 22%, transparent)", color: "var(--primary-hover)" } : { color: "var(--text4)" }}>
+            {w.label}
+          </button>
+        ))}
+      </div>
+
+      {/* max-w keeps long worktree names (e.g. feature-branch-…) from blowing the header open */}
+      <Select value={filter.app} style={selStyle} options={[{ value: "", label: "all apps" }, ...apps.map((a) => ({ value: a, label: a }))]} onChange={(v) => onFilter({ ...filter, app: v })} />
+      <Select value={filter.type} style={selStyle} options={[{ value: "", label: "all events" }, ...types.map((t) => ({ value: t, label: t }))]} onChange={(v) => onFilter({ ...filter, type: v })} />
+      {/* Provider is auto-detected from each session's model. With one provider
+          it's shown but disabled (just so you can see it); a mixed fleet
+          (Anthropic + OpenAI + …) turns it into a real filter. */}
+      {providers.length === 1 && (
+        <Select value={providers[0]} style={selStyle} options={[{ value: providers[0], label: providers[0] }]} onChange={() => {}} disabled title={`only provider seen: ${providers[0]}`} />
+      )}
+      {providers.length > 1 && (
+        <Select value={filter.provider} style={selStyle} options={[{ value: "", label: "all providers" }, ...providers.map((p) => ({ value: p, label: p }))]} onChange={(v) => onFilter({ ...filter, provider: v })} />
+      )}
+      {hasFilter && <button onClick={onClear} className="text-[11px] px-2 py-1 rounded-lg shrink-0 whitespace-nowrap" style={{ color: "var(--warning)", border: "1px solid color-mix(in srgb, var(--warning) 40%, transparent)" }}>clear ✕</button>}
+      </div>{/* middle scroll zone */}
+
+      <div className="shrink-0 flex items-center gap-2">
+        {/* Anthropic plan meters — only shown when viewing Anthropic (it's the
+            one provider with a usage API), and only where there's room. */}
+        {showUsage && <div className="hidden 2xl:block"><UsageWidget /></div>}
+        <button onClick={onOpenPalette} className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-[11px]" style={selStyle}>
+          <span>{MOD_KEY}K</span><span className="hidden sm:inline t-dim2">search</span>
+        </button>
+        {/* Git + Diff are the primary workspaces (replacing lazygit) — labeled + accented */}
+        <button
+          onClick={onOpenGit}
+          title="Source control — stage, commit, push/pull the working tree (g)"
+          className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-[11px] font-semibold"
+          style={{
+            color: "var(--primary-hover)",
+            background: "color-mix(in srgb, var(--primary) 18%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--primary) 50%, transparent)",
+          }}
+        >
+          <GitIcon />
+          <span className="hidden sm:inline">git</span>
+        </button>
+        <button
+          onClick={onOpenChanges}
+          title="File changes — review & commit every diff the fleet made (d)"
+          className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-[11px] font-semibold"
+          style={{
+            color: "var(--primary-hover)",
+            background: "color-mix(in srgb, var(--primary) 18%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--primary) 50%, transparent)",
+          }}
+        >
+          <DiffIcon />
+          <span className="hidden sm:inline">diff</span>
+        </button>
+        <button
+          onClick={onOpenDocker}
+          title="Docker — containers, logs, stats & actions (o)"
+          className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-[11px] font-semibold"
+          style={{
+            color: "var(--primary-hover)",
+            background: "color-mix(in srgb, var(--primary) 18%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--primary) 50%, transparent)",
+          }}
+        >
+          <DockerIcon />
+          <span className="hidden md:inline">docker</span>
+        </button>
+        <button
+          onClick={onOpenTerminal}
+          title="Terminal — a real shell in any repo/worktree (t)"
+          className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-[11px] font-semibold"
+          style={{
+            color: "var(--primary-hover)",
+            background: "color-mix(in srgb, var(--primary) 18%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--primary) 50%, transparent)",
+          }}
+        >
+          <TerminalIcon />
+          <span className="hidden lg:inline">term</span>
+        </button>
+        <button
+          onClick={onOpenChat}
+          title="Chat — drive a Claude session in any repo/worktree (c)"
+          className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-[11px] font-semibold"
+          style={{
+            color: "var(--primary-hover)",
+            background: "color-mix(in srgb, var(--primary) 18%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--primary) 50%, transparent)",
+          }}
+        >
+          <ChatIcon />
+          <span className="hidden lg:inline">chat</span>
+        </button>
+        {/* Skills demoted to a plain icon */}
+        <IconBtn title="Skills explorer — browse every available skill (k)" onClick={onOpenSkills}><SkillsIcon /></IconBtn>
+        <MoreMenu sound={sound} onSound={onSound} onOpenStats={onOpenStats} onOpenHelp={onOpenHelp} />
+        <ThemeSwitcher current={theme} onChange={onTheme} />
+      </div>
+    </header>
+  );
+}
