@@ -123,6 +123,25 @@ function trustedCaller(req: Request): boolean {
 }
 const csrfBlocked = () => json({ ok: false, error: "cross-origin write blocked" }, 403);
 
+/**
+ * DNS-rebinding guard: the Host header must name an address that is plausibly
+ * this machine.
+ *
+ * The Origin gate above can't see one attack: a site the user visits points
+ * its *own* domain's DNS at 127.0.0.1, and from then on the browser talks to
+ * this server as if it were that site — same-origin, so plain GETs carry no
+ * Origin header at all and would sail through as "non-browser callers". What
+ * that page CAN'T forge is the Host header, which still names the attacker's
+ * domain. Refusing any Host that isn't localhost or a private address closes
+ * the door; a reverse-proxy name can be allowed explicitly.
+ */
+const ALLOWED_HOSTS = new Set(
+  (process.env.AGENTGLASS_ALLOWED_HOSTS || "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean)
+);
+const trustedHost = (url: URL) => privateHost(url.hostname) || ALLOWED_HOSTS.has(url.hostname.toLowerCase());
+const rebindBlocked = () =>
+  json({ ok: false, error: "request Host is not a local or private address (DNS-rebinding guard — set AGENTGLASS_ALLOWED_HOSTS for a reverse-proxy name)" }, 403);
+
 function broadcast(frame: WsFrame) {
   const msg = JSON.stringify(frame);
   for (const ws of clients) {
@@ -158,6 +177,10 @@ const server = Bun.serve({
   async fetch(req, srv) {
     const url = new URL(req.url);
     const { pathname } = url;
+
+    // Before anything else — including OPTIONS and WS upgrades: a request that
+    // arrived under a foreign Host is a rebinding attempt, whatever it asks.
+    if (!trustedHost(url)) return rebindBlocked();
 
     if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 

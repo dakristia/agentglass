@@ -31,6 +31,7 @@ gate. No install, no server. *(Everything there is fake; it's a showcase.)*
 - [Why](#why) · [Themes](#themes)
 - [Quickstart](#quickstart)
 - [Desktop app](#desktop-app)
+- [Security model — read this before installing](#security-model--read-this-before-installing)
 - [Control plane — approve / deny remotely](#control-plane--approve--deny-tool-calls-remotely-opt-in)
 - [Any provider — via OpenTelemetry](#any-provider--via-opentelemetry-openai-gemini-bedrock-)
 - [Configuration](#configuration-env) · [API](#api) · [Architecture](#architecture)
@@ -270,6 +271,37 @@ make desktop-open DIR=~/code/my-project   # or: agentglass ~/code/my-project
 
 ---
 
+## Security model — read this before installing
+
+agentglass is a **workspace, not just a viewer**: it can open a real shell,
+write to your repos and control Docker. It ships safe for its intended home —
+**your own single-user machine** — and you should know exactly where the lines
+are:
+
+- **It only listens on your own machine.** The server binds `127.0.0.1` — 
+  nothing on your network can reach it. There is **no authentication**, because
+  on a single-user machine "can reach localhost" already means "is you".
+- **Websites you visit can't touch it.** Every request is origin-checked, the
+  shell and the live stream require a verified local origin, and a Host-header
+  guard blocks DNS-rebinding tricks (browsers can't forge `Host`). Running it
+  behind a reverse proxy? Allow its name via `AGENTGLASS_ALLOWED_HOSTS`.
+- **⚠️ Shared / multi-user machines are NOT the intended home.** `localhost`
+  belongs to the *machine*, not to your account — on a box where other people
+  also have accounts, any of them could reach the server and its shell **as
+  your user**. If you must run it there, disable the capability surfaces:
+  `AGENTGLASS_TERMINAL_DISABLED=1`, `AGENTGLASS_CHAT_DISABLED=1`,
+  `AGENTGLASS_GIT_WRITE_DISABLED=1`, `AGENTGLASS_DOCKER_WRITE_DISABLED=1`.
+- **⚠️ Never set `AGENTGLASS_BIND=0.0.0.0` on a network you don't fully
+  trust.** It hands the shell, git write and Docker control to anyone on that
+  network, unauthenticated. It exists for trusted-LAN setups only, and turning
+  it on is a deliberate act.
+- **Your data stays local.** Events live in a local SQLite file (owner-only
+  permissions). The only outbound call is the optional Anthropic plan-usage
+  meter (`api.anthropic.com`, using your own credentials) and anything *you*
+  configure (webhook alerts).
+
+---
+
 ## Control plane — approve / deny tool calls remotely (opt-in)
 
 agentglass can do more than watch: a `PreToolUse` hook can **hold a tool call**
@@ -353,7 +385,8 @@ inference, prompt) to an event the same way.
 | Var | Default | Meaning |
 |---|---|---|
 | `AGENTGLASS_PORT` | `4000` | Server HTTP/WS port. |
-| `AGENTGLASS_BIND` | `127.0.0.1` | Address the server binds to. Loopback-only by default. Setting `0.0.0.0` exposes the terminal / git-write / Docker control to your network **unauthenticated** — only on a trusted LAN. |
+| `AGENTGLASS_BIND` | `127.0.0.1` | Address the server binds to. Loopback-only by default. Setting `0.0.0.0` exposes the terminal / git-write / Docker control to your network **unauthenticated** — only on a trusted LAN. See [Security model](#security-model--read-this-before-installing). |
+| `AGENTGLASS_ALLOWED_HOSTS` | — | Comma-separated extra hostnames accepted by the DNS-rebinding guard (requests must arrive under a localhost/private `Host`). Only needed behind a reverse proxy. |
 | `AGENTGLASS_DB` | `agentglass.db` | SQLite file path. |
 | `AGENTGLASS_ROOT` | — | Scope the whole cockpit to one project (repo + worktrees) or a folder of projects. Unset = every project on the machine. Also set by passing a directory to the desktop app; the in-app **project picker** sets/clears the same scope at runtime and persists it as `root` in the config file (note: the env var, when set, wins again on the next launch). |
 | `AGENTGLASS_REPO_DIRS` | — | Colon-separated dirs to sweep for git repos (git / terminal / chat panels). Also settable as `repoDirs` in the config file. |
