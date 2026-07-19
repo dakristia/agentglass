@@ -47,6 +47,7 @@ import { workspaceRoot, setWorkspaceRoot, CONFIG_PATH } from "./config.ts";
 import { privateHost } from "./net.ts";
 import { resolveToken, tokenOk, isIntake, isAuthExempt } from "./auth.ts";
 import { rateOk } from "./ratelimit.ts";
+import { parseWindowMs } from "./params.ts";
 
 const PORT = Number(process.env.AGENTGLASS_PORT || 4000);
 /** When this process came up. /stats ships it so the dashboard's uptime is
@@ -524,7 +525,7 @@ const server = Bun.serve<WsData>({
       return json(getSessions(limit, url.searchParams.get("provider") || undefined));
     }
     if (pathname === "/stats") {
-      const windowMs = Math.min(3660 * 86_400_000, Math.max(60_000, Number(url.searchParams.get("window") || 24 * 3600 * 1000)));
+      const windowMs = parseWindowMs(url.searchParams.get("window"));
       return json({ ...statsSummary(windowMs, url.searchParams.get("provider") || undefined), server_started_at: STARTED_AT });
     }
 
