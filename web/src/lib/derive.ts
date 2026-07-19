@@ -1,5 +1,5 @@
 import type { WatchEvent } from "../../../shared/types.ts";
-import { agentKey } from "./format.ts";
+import { agentKey, fmtMs } from "./format.ts";
 
 export type AgentStatus = "working" | "waiting" | "errored" | "idle";
 
@@ -23,10 +23,19 @@ export interface AgentCard {
   subagents: number;
   /** Subagent type → count, most common first (e.g. Explore, workflow-subagent). */
   subagentTypes: [string, number][];
+  /** A tool call that started (PreToolUse) and hasn't reported back yet. */
+  runningTool: string | null;
+  runningSince: number;
 }
 
 const STALL_MS = 20_000;
 const IDLE_MS = 5 * 60_000;
+// An open tool call older than this is a lost pair (crashed session, dropped
+// event), not a genuinely long build — stop vouching for it as "working".
+const TOOL_RUN_MAX_MS = 30 * 60_000;
+// An open tool call this old is worth a heads-up: probably a long build,
+// possibly a hang — either way the user wants to know it's still open.
+const TOOL_RUN_WARN_MS = 5 * 60_000;
 
 /** Roll the live event buffer up into per-agent cards. */
 export function deriveAgents(events: WatchEvent[]): AgentCard[] {
@@ -35,6 +44,23 @@ export function deriveAgents(events: WatchEvent[]): AgentCard[] {
   // Subagents fold into their parent session_id but carry agent_id/agent_type,
   // so track the distinct subagents (and their kinds) seen per session.
   const subs = new Map<string, Map<string, string>>(); // key → (agent_id → agent_type)
+
+  // Finished-tool lookups, so an open PreToolUse can be told apart from one
+  // whose Post already landed (same pairing the feed does). A quiet session
+  // mid-build emits nothing for minutes — the open Pre is the only evidence
+  // it's still working rather than idle.
+  const postIds = new Set<string>();
+  const postBySessTool = new Map<string, number[]>();
+  for (const e of events) {
+    if (e.hook_event_type !== "PostToolUse" && e.hook_event_type !== "PostToolUseFailure") continue;
+    if (e.tool_use_id) postIds.add(e.tool_use_id);
+    if (e.tool_name) {
+      const k = `${e.session_id}|${e.tool_name}`;
+      const arr = postBySessTool.get(k) ?? [];
+      arr.push(e.timestamp);
+      postBySessTool.set(k, arr);
+    }
+  }
 
   for (const e of events) {
     const key = agentKey(e);
@@ -58,8 +84,16 @@ export function deriveAgents(events: WatchEvent[]): AgentCard[] {
         spark: new Array(20).fill(0),
         subagents: 0,
         subagentTypes: [],
+        runningTool: null,
+        runningSince: 0,
       };
       map.set(key, a);
+    }
+    if (e.hook_event_type === "PreToolUse" && e.timestamp >= a.runningSince) {
+      const done = e.tool_use_id
+        ? postIds.has(e.tool_use_id)
+        : (postBySessTool.get(`${e.session_id}|${e.tool_name}`) ?? []).some((t) => t >= e.timestamp);
+      if (!done) { a.runningTool = e.tool_name || "tool"; a.runningSince = e.timestamp; }
     }
     if (e.agent_id) {
       let m = subs.get(key);
@@ -94,16 +128,27 @@ export function deriveAgents(events: WatchEvent[]): AgentCard[] {
 
   for (const a of map.values()) {
     const since = now - a.lastSeen;
+    // A session that ended can't still be running a tool, whatever pair we
+    // think is open; and an open pair past the ceiling is lost, not long.
+    if (a.lastType === "Stop" || a.lastType === "SessionEnd" || (a.runningTool && now - a.runningSince >= TOOL_RUN_MAX_MS)) {
+      a.runningTool = null;
+    }
+    const running = !!a.runningTool;
     // Anything idle long enough is idle, regardless of what it was doing —
     // otherwise an abandoned "waiting"/"errored" agent stays lit forever and
-    // keeps re-triggering its alert.
-    if (since >= IDLE_MS || a.lastType === "Stop" || a.lastType === "SessionEnd") a.status = "idle";
+    // keeps re-triggering its alert. An open tool call is the one exception:
+    // a long build emits no events while it runs, and reading that silence as
+    // idle is exactly the slow-vs-hung false positive to avoid.
+    if ((since >= IDLE_MS && !running) || a.lastType === "Stop" || a.lastType === "SessionEnd") a.status = "idle";
     else if (a.lastType === "PermissionRequest" || a.lastType === "Notification") a.status = "waiting";
     // Errored only on a RECENT error, not a lifetime count — one transient
     // failure early shouldn't paint a now-healthy agent red for its whole run.
     else if (now - a.lastErrorTs < STALL_MS) a.status = "errored";
-    else if (since < STALL_MS) a.status = "working";
+    else if (since < STALL_MS || running) a.status = "working";
     else a.status = "idle";
+    // While a tool call is open, its live duration is the most informative
+    // thing the card can say — better than the stale "PreToolUse · Bash".
+    if (a.status === "working" && running) a.lastAction = `running ${a.runningTool} · ${fmtMs(now - a.runningSince)}`;
 
     const m = subs.get(a.key);
     if (m) {
@@ -126,12 +171,18 @@ export interface Alert {
 }
 
 export function deriveAlerts(agents: AgentCard[]): Alert[] {
+  const now = Date.now();
   const out: Alert[] = [];
   for (const a of agents) {
     if (a.status === "waiting")
       out.push({ id: "wait:" + a.key, level: "warn", agent: a.key, text: "waiting for approval / input", ts: a.lastSeen });
     if (a.status === "errored")
       out.push({ id: "err:" + a.key, level: "error", agent: a.key, text: `${a.errors} error(s) — last action ${a.lastAction}`, ts: a.lastSeen });
+    // A tool call open this long deserves eyes: could be a fat build, could be
+    // a hang — the alert says which tool and for how long, and the user knows
+    // which of the two their project makes plausible.
+    if (a.status === "working" && a.runningTool && now - a.runningSince >= TOOL_RUN_WARN_MS)
+      out.push({ id: "long:" + a.key, level: "warn", agent: a.key, text: `${a.runningTool} running for ${fmtMs(now - a.runningSince)} — long job or stuck?`, ts: a.runningSince });
     const rate = a.tools > 3 ? a.errors / a.tools : 0;
     if (rate > 0.25)
       out.push({ id: "rate:" + a.key, level: "error", agent: a.key, text: `high failure rate ${(rate * 100).toFixed(0)}%`, ts: a.lastSeen });

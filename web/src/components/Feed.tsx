@@ -89,9 +89,76 @@ function buildRows(events: WatchEvent[]): Row[] {
   return rows;
 }
 
+/** One feed line — shared between the single stream and the per-session lanes. */
+function EventRow({ row, onSelect, compact }: { row: Row; onSelect?: (e: WatchEvent) => void; compact?: boolean }) {
+  const { e, running, count } = row;
+  const f = running ? { verb: "Running", color: "#a78bfa", dot: "run" as const } : friendly(e);
+  const d = detail(e);
+  const aKey = agentKey(e);
+  const aColor = hashColor(aKey);
+  return (
+    <motion.div
+      onClick={() => onSelect?.(e)}
+      initial={{ opacity: 0, x: -12, backgroundColor: `color-mix(in srgb, ${f.color} 22%, transparent)` }}
+      animate={{ opacity: 1, x: 0, backgroundColor: "rgba(0,0,0,0)" }}
+      whileHover={{ backgroundColor: "color-mix(in srgb, var(--primary) 12%, transparent)" }}
+      transition={{ duration: 0.5 }}
+      className="relative flex items-center gap-2 py-1 pr-1.5 pl-3 rounded-md text-[11px] cursor-pointer min-w-0"
+    >
+      {/* inset rounded rail per agent — matches the session cards */}
+      <span className="absolute left-[3px] top-1 bottom-1 w-[3px] rounded-full" style={{ background: `color-mix(in srgb, ${aColor} 70%, transparent)` }} />
+      <span className="t-dim2 tabular-nums shrink-0">{fmtTime(e.timestamp)}</span>
+      {running ? (
+        <span className="h-2 w-2 rounded-full shrink-0 animate-pulse" style={{ background: DOT_COLOR.run, boxShadow: `0 0 6px ${DOT_COLOR.run}` }} />
+      ) : (
+        <span className="h-2 w-2 rounded-full shrink-0" style={{ background: DOT_COLOR[f.dot], boxShadow: `0 0 6px ${DOT_COLOR[f.dot]}` }} />
+      )}
+      <span className="shrink-0 font-medium" style={{ color: f.color }}>{f.verb}</span>
+      {e.tool_name && (
+        <span className="chip shrink-0" style={{ color: "var(--info)", background: "color-mix(in srgb, var(--info) 14%, transparent)" }}>{e.tool_name}</span>
+      )}
+      {d && <span className="truncate t-dim min-w-0" title={d}>{d}</span>}
+      {running && <span className="shrink-0 t-dim2 animate-pulse">…</span>}
+      {count > 1 && (
+        <span className="chip shrink-0" style={{ color: "var(--warning)", background: "color-mix(in srgb, var(--warning) 14%, transparent)" }}>×{count}</span>
+      )}
+      {e.duration_ms != null && <span className="t-dim2 shrink-0">{fmtMs(e.duration_ms)}</span>}
+      {e.cost_usd > 0 && <span className="shrink-0" style={{ color: "var(--success)" }}>{fmtUsd(e.cost_usd)}</span>}
+      {/* in a lane the column header already names the agent — the per-row tag is noise there */}
+      {!compact && <span className="ml-auto shrink-0 truncate max-w-[120px]" style={{ color: `color-mix(in srgb, ${aColor} 75%, var(--text4))` }} title={aKey}>{aKey}</span>}
+    </motion.div>
+  );
+}
+
+/** One session's column in the lanes view: its own header and its own scroll,
+ *  pinned to the newest line — so three busy Claudes read as three tidy
+ *  streams instead of one interleaved wall. */
+function Lane({ aKey, rows, onSelect }: { aKey: string; rows: Row[]; onSelect?: (e: WatchEvent) => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const color = hashColor(aKey);
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [rows.length, rows[rows.length - 1]?.key]);
+  return (
+    <div className="flex flex-col min-w-0 min-h-0 rounded-lg" style={{ border: "1px solid color-mix(in srgb, var(--border) 35%, transparent)", background: "color-mix(in srgb, var(--bg3) 20%, transparent)" }}>
+      <div className="flex items-center gap-1.5 px-2 py-1.5 border-b shrink-0" style={{ borderColor: "color-mix(in srgb, var(--border) 30%, transparent)" }}>
+        <span className="h-2 w-2 rounded-full shrink-0" style={{ background: color, boxShadow: `0 0 6px ${color}` }} />
+        <span className="text-[10.5px] font-medium truncate" style={{ color: `color-mix(in srgb, ${color} 75%, var(--text))` }} title={aKey}>{aKey}</span>
+        <span className="ml-auto text-[9.5px] t-dim2 tabular-nums shrink-0">{rows.length}</span>
+      </div>
+      <div ref={ref} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-1 py-0.5">
+        {rows.map((row) => <EventRow key={row.key} row={row} onSelect={onSelect} compact />)}
+      </div>
+    </div>
+  );
+}
+
+const MAX_LANES = 4; // beyond four a lane is too narrow to read
+
 export function Feed({ events, filter, sessionProvider, onSelect, onClearFilter }: { events: WatchEvent[]; filter: { app: string; type: string; provider: string }; sessionProvider?: Map<string, string>; onSelect?: (e: WatchEvent) => void; onClearFilter?: () => void }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState<Category>("all");
+  const [lanes, setLanes] = useState(false);
   const [follow, setFollow] = useState(true);
   const [pausedId, setPausedId] = useState<number | null>(null); // newest event id when following stopped
   const [full, setFull] = useState(false);
@@ -133,6 +200,23 @@ export function Feed({ events, filter, sessionProvider, onSelect, onClearFilter 
   }, [events, filter.app, filter.type, filter.provider, sessionProvider, cat, q]);
 
   const rows = useMemo(() => buildRows(shown).slice(-120), [shown]);
+
+  // Lanes: the same filtered stream, split one column per session, most
+  // recently active first. With several sessions running at once the single
+  // feed interleaves into a wall — a lane per session keeps each story linear.
+  const laneData = useMemo(() => {
+    if (!lanes) return [];
+    const by = new Map<string, WatchEvent[]>();
+    for (const e of shown) {
+      const k = agentKey(e);
+      const arr = by.get(k);
+      if (arr) arr.push(e); else by.set(k, [e]);
+    }
+    return [...by.entries()]
+      .map(([k, evs]) => ({ key: k, last: evs[evs.length - 1].timestamp, rows: buildRows(evs).slice(-80) }))
+      .sort((a, b) => b.last - a.last)
+      .slice(0, MAX_LANES);
+  }, [lanes, shown]);
 
   useEffect(() => {
     if (follow && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
@@ -230,57 +314,39 @@ export function Feed({ events, filter, sessionProvider, onSelect, onClearFilter 
                 {c.label}
               </button>
             ))}
+            <button
+              onClick={() => setLanes((l) => !l)}
+              title="one column per session — parallel sessions get their own lane"
+              className="chip cursor-pointer"
+              style={
+                lanes
+                  ? { color: "var(--primary)", background: "color-mix(in srgb, var(--primary) 16%, transparent)", borderColor: "color-mix(in srgb, var(--primary) 50%, transparent)" }
+                  : { color: "var(--text4)" }
+              }
+            >
+              ⫴ lanes
+            </button>
           </div>
         </div>
-        <div ref={ref} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-1"
-          onScroll={(e) => {
-            const el = e.currentTarget;
-            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-            if (atBottom !== follow) applyFollow(atBottom);
-          }}
-        >
-          <AnimatePresence initial={false}>
-            {rows.map(({ key, e, running, count }) => {
-              const f = running ? { verb: "Running", color: "#a78bfa", dot: "run" as const } : friendly(e);
-              const d = detail(e);
-              const aKey = agentKey(e);
-              const aColor = hashColor(aKey);
-              return (
-                <motion.div
-                  key={key}
-                  onClick={() => onSelect?.(e)}
-                  initial={{ opacity: 0, x: -12, backgroundColor: `color-mix(in srgb, ${f.color} 22%, transparent)` }}
-                  animate={{ opacity: 1, x: 0, backgroundColor: "rgba(0,0,0,0)" }}
-                  whileHover={{ backgroundColor: "color-mix(in srgb, var(--primary) 12%, transparent)" }}
-                  transition={{ duration: 0.5 }}
-                  className="relative flex items-center gap-2 py-1 pr-1.5 pl-3 rounded-md text-[11px] cursor-pointer min-w-0"
-                >
-                  {/* inset rounded rail per agent — matches the session cards */}
-                  <span className="absolute left-[3px] top-1 bottom-1 w-[3px] rounded-full" style={{ background: `color-mix(in srgb, ${aColor} 70%, transparent)` }} />
-                  <span className="t-dim2 tabular-nums shrink-0">{fmtTime(e.timestamp)}</span>
-                  {running ? (
-                    <span className="h-2 w-2 rounded-full shrink-0 animate-pulse" style={{ background: DOT_COLOR.run, boxShadow: `0 0 6px ${DOT_COLOR.run}` }} />
-                  ) : (
-                    <span className="h-2 w-2 rounded-full shrink-0" style={{ background: DOT_COLOR[f.dot], boxShadow: `0 0 6px ${DOT_COLOR[f.dot]}` }} />
-                  )}
-                  <span className="shrink-0 font-medium" style={{ color: f.color }}>{f.verb}</span>
-                  {e.tool_name && (
-                    <span className="chip shrink-0" style={{ color: "var(--info)", background: "color-mix(in srgb, var(--info) 14%, transparent)" }}>{e.tool_name}</span>
-                  )}
-                  {d && <span className="truncate t-dim min-w-0" title={d}>{d}</span>}
-                  {running && <span className="shrink-0 t-dim2 animate-pulse">…</span>}
-                  {count > 1 && (
-                    <span className="chip shrink-0" style={{ color: "var(--warning)", background: "color-mix(in srgb, var(--warning) 14%, transparent)" }}>×{count}</span>
-                  )}
-                  {e.duration_ms != null && <span className="t-dim2 shrink-0">{fmtMs(e.duration_ms)}</span>}
-                  {e.cost_usd > 0 && <span className="shrink-0" style={{ color: "var(--success)" }}>{fmtUsd(e.cost_usd)}</span>}
-                  <span className="ml-auto shrink-0 truncate max-w-[120px]" style={{ color: `color-mix(in srgb, ${aColor} 75%, var(--text4))` }} title={aKey}>{aKey}</span>
-                </motion.div>
-              );
-            })}
-          </AnimatePresence>
-          {rows.length === 0 && <div className="t-dim2 text-center py-8">no events match</div>}
-        </div>
+        {lanes ? (
+          <div className="flex-1 min-h-0 grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.max(1, laneData.length)}, minmax(0, 1fr))` }}>
+            {laneData.map((l) => <Lane key={l.key} aKey={l.key} rows={l.rows} onSelect={onSelect} />)}
+            {laneData.length === 0 && <div className="t-dim2 text-center py-8">no events match</div>}
+          </div>
+        ) : (
+          <div ref={ref} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-1"
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+              if (atBottom !== follow) applyFollow(atBottom);
+            }}
+          >
+            <AnimatePresence initial={false}>
+              {rows.map((row) => <EventRow key={row.key} row={row} onSelect={onSelect} />)}
+            </AnimatePresence>
+            {rows.length === 0 && <div className="t-dim2 text-center py-8">no events match</div>}
+          </div>
+        )}
       </div>
   );
 

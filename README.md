@@ -131,6 +131,11 @@ session. Sessions you start here show up in the fleet like any other agent.
 
 ## Why
 
+agentglass is a **visibility layer, not a harness**: it doesn't run your agents
+or impose a workflow on them — it shows you what they're actually doing, and
+puts the controls (diff, commit, terminal, docker) next to what it shows.
+Everyone's harness is their own; the missing piece is seeing through it.
+
 Most agent dashboards show a live event feed and forget everything on refresh. agentglass adds the layer that actually answers *"what did this cost, what's slow, what's breaking, and how much of my plan is left?"* — across every provider and every project, wrapped in a fast, animated cockpit.
 
 | Feature | What you get |

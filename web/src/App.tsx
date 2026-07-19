@@ -87,9 +87,20 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  // Statuses are functions of the clock, not only of the buffer: a session
+  // mid-build emits nothing for minutes, and without a tick its card would
+  // freeze on whatever was derived at the last event — never demoting to
+  // idle, never advancing the "running Bash · 4m" duration.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 10_000);
+    return () => clearInterval(id);
+  }, []);
+
   // Every session's provider, from the FULL buffer (so the list is stable and
   // never collapses when one provider is selected).
-  const agentsAll = useMemo(() => deriveAgents(events), [events]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const agentsAll = useMemo(() => deriveAgents(events), [events, tick]);
   const sessionProvider = useMemo(() => {
     const map = new Map<string, string>();
     for (const a of agentsAll) if (a.model_name) map.set(a.session_id, providerOf(a.model_name));
