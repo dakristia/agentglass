@@ -26,6 +26,21 @@ export interface AgentCard {
   /** A tool call that started (PreToolUse) and hasn't reported back yet. */
   runningTool: string | null;
   runningSince: number;
+  /** Context-window estimate: the latest turn's full prompt size (input +
+   *  cache read + cache write — each API call re-sends the conversation, so
+   *  that sum IS the context). 0 = no turn seen yet. */
+  ctxTokens: number;
+  ctxTs: number;
+  ctxLimit: number;
+}
+
+/** Context-window ceiling by model — coarse, for the radar's "how close to
+ *  compaction" scale. Unknown models get Claude's 200k. */
+function ctxLimitOf(model: string | null): number {
+  const m = (model || "").toLowerCase();
+  if (m.includes("gemini")) return 1_000_000;
+  if (m.includes("gpt") || /^o[134]/.test(m)) return 128_000;
+  return 200_000;
 }
 
 const STALL_MS = 20_000;
@@ -86,8 +101,17 @@ export function deriveAgents(events: WatchEvent[]): AgentCard[] {
         subagentTypes: [],
         runningTool: null,
         runningSince: 0,
+        ctxTokens: 0,
+        ctxTs: 0,
+        ctxLimit: 200_000,
       };
       map.set(key, a);
+    }
+    // Context estimate from the newest MAIN-session turn. Subagent turns are
+    // excluded — a subagent has its own context, not the session's.
+    if (!e.agent_id) {
+      const turnTok = e.input_tokens + e.cache_read_tokens + e.cache_creation_tokens;
+      if (turnTok > 0 && e.timestamp >= a.ctxTs) { a.ctxTokens = turnTok; a.ctxTs = e.timestamp; }
     }
     if (e.hook_event_type === "PreToolUse" && e.timestamp >= a.runningSince) {
       const done = e.tool_use_id
@@ -149,6 +173,8 @@ export function deriveAgents(events: WatchEvent[]): AgentCard[] {
     // While a tool call is open, its live duration is the most informative
     // thing the card can say — better than the stale "PreToolUse · Bash".
     if (a.status === "working" && running) a.lastAction = `running ${a.runningTool} · ${fmtMs(now - a.runningSince)}`;
+
+    a.ctxLimit = ctxLimitOf(a.model_name);
 
     const m = subs.get(a.key);
     if (m) {

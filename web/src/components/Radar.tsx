@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "motion/react";
 import { Panel } from "./Panel.tsx";
-import { fmtUsd } from "../lib/format.ts";
+import { fmtUsd, fmtTokens } from "../lib/format.ts";
 import type { AgentCard, AgentStatus } from "../lib/derive.ts";
 
 const STATUS_COLOR: Record<string, string> = {
@@ -22,18 +22,29 @@ const P = (deg: number, rad: number): [number, number] => [
   C + rad * Math.sin((deg * Math.PI) / 180),
 ];
 
-/** Live radar: agents plotted by recency (centre = just acted) with a sweeping beam. */
+/** A session's fixed bearing on the dial — hashed from its key so a blip
+ *  keeps its angle for its whole life instead of jumping every re-sort. */
+function bearingOf(key: string): number {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+  return ((h % 360) + 360) % 360;
+}
+
+/** Live radar: distance from centre = context window used. A fresh session
+ *  sits at the middle; a blip drifting to the outer ring is about to
+ *  compact. Sessions with no turn data yet fall back to recency, dimmed. */
 export function Radar({ agents, onSelect }: { agents: AgentCard[]; onSelect?: (a: AgentCard) => void }) {
   const [hover, setHover] = useState<string | null>(null);
   const now = Date.now();
 
-  const blips = agents.slice(0, 24).map((a, i) => {
-    const age = Math.min(1, (now - a.lastSeen) / (5 * 60_000)); // 0 fresh → 1 old
-    const radius = 16 + age * (R - 26);
-    const angle = i * 137.5; // golden-angle spread (deg)
+  const blips = agents.slice(0, 24).map((a) => {
+    const frac = a.ctxTokens > 0 ? Math.min(1, a.ctxTokens / a.ctxLimit) : null;
+    const age = Math.min(1, (now - a.lastSeen) / (5 * 60_000)); // recency fallback: 0 fresh → 1 old
+    const radius = 16 + (frac ?? age) * (R - 26);
+    const angle = bearingOf(a.key);
     const busy = Math.min(1, a.spark.reduce((s, v) => s + v, 0) / 12);
     const [x, y] = P(angle, radius);
-    return { a, x, y, size: 3.4 + busy * 4.2, color: STATUS_COLOR[a.status] ?? "var(--text4)" };
+    return { a, x, y, frac, size: 3.4 + busy * 4.2, color: STATUS_COLOR[a.status] ?? "var(--text4)" };
   });
 
   const counts = STATUS_ORDER.map((s) => ({ s, n: agents.filter((a) => a.status === s).length }));
@@ -54,7 +65,7 @@ export function Radar({ agents, onSelect }: { agents: AgentCard[]; onSelect?: (a
     <Panel
       eyebrow="Radar"
       title="Live radar"
-      right={<span className="text-[10px] t-dim2">{agents.length} tracked · centre = now</span>}
+      right={<span className="text-[10px] t-dim2">{agents.length} tracked · edge = context full</span>}
     >
       <div className="flex flex-col h-full">
         <div className="relative flex-1 min-h-0 flex items-center justify-center">
@@ -101,9 +112,9 @@ export function Radar({ agents, onSelect }: { agents: AgentCard[]; onSelect?: (a
               );
             })}
 
-            {/* range labels */}
-            <text x={C + 3} y={C - R * 0.34 + 8} fontSize={7} fill="var(--text4)" className="tabular-nums">now</text>
-            <text x={C + 3} y={C - R + 10} fontSize={7} fill="var(--text4)" className="tabular-nums">5m</text>
+            {/* range labels — fraction of the context window used */}
+            <text x={C + 3} y={C - R * 0.34 + 8} fontSize={7} fill="var(--text4)" className="tabular-nums">⅓ ctx</text>
+            <text x={C + 3} y={C - R + 10} fontSize={7} fill="var(--text4)" className="tabular-nums">full</text>
 
             {/* (sweep lives in a separate, GPU-composited <svg> overlay below) */}
 
@@ -126,8 +137,8 @@ export function Radar({ agents, onSelect }: { agents: AgentCard[]; onSelect?: (a
                   {/* halo — a soft translucent disc (no SVG filter: filters
                       re-raster every frame as the sweep passes over them) */}
                   <circle cx={b.x} cy={b.y} r={b.size + (active ? 4 : 2.6)} fill={b.color} opacity={active ? 0.4 : 0.2} />
-                  {/* core */}
-                  <circle cx={b.x} cy={b.y} r={active ? b.size + 1 : b.size} fill={b.color} />
+                  {/* core — dimmed when the position is recency fallback, not context */}
+                  <circle cx={b.x} cy={b.y} r={active ? b.size + 1 : b.size} fill={b.color} opacity={b.frac == null ? 0.55 : 1} />
                 </motion.g>
               );
             })}
@@ -170,10 +181,13 @@ export function Radar({ agents, onSelect }: { agents: AgentCard[]; onSelect?: (a
   );
 }
 
-function Tooltip({ b }: { b: { a: AgentCard; x: number; y: number } }) {
+function Tooltip({ b }: { b: { a: AgentCard; x: number; y: number; frac: number | null } }) {
   const lines = [
     b.a.key,
     `${b.a.status} · ${b.a.lastType || "—"}`,
+    b.frac != null
+      ? `ctx ${fmtTokens(b.a.ctxTokens)} / ${fmtTokens(b.a.ctxLimit)} (${Math.round(b.frac * 100)}%)`
+      : "ctx unknown — placed by recency",
     `${b.a.tools} tools · ${fmtUsd(b.a.cost)}`,
   ];
   const w = Math.min(150, Math.max(...lines.map((l) => l.length)) * 4.4 + 12);

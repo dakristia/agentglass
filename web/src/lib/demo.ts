@@ -57,6 +57,7 @@ const PATHS = [
 const SKILL_NAMES = ["pr-summary", "code-review", "test-scaffold", "dep-upgrade", "changelog-gen"];
 
 let idc = 1000;
+const demoCtx = new Map<string, number>(); // session → simulated context size
 function mkEvent(o: Partial<WatchEvent> & { source_app: string; session_id: string; hook_event_type: string }): WatchEvent {
   return {
     id: ++idc,
@@ -89,7 +90,21 @@ function nextEvent(): WatchEvent {
     const detail = tool === "Bash" ? pick(BASHES) : pick(PATHS);
     return mkEvent({ ...base, hook_event_type: "PreToolUse", tool_name: tool, tool_use_id: uid(), payload: { tool_name: tool, tool_input: tool === "Bash" ? { command: detail } : { file_path: detail } } });
   }
-  if (roll < 0.72) return mkEvent({ ...base, hook_event_type: "Turn complete", cost_usd: Number(rnd(0.4, 9).toFixed(2)), input_tokens: rint(2000, 40000), output_tokens: rint(500, 6000) });
+  if (roll < 0.72) {
+    // Each turn re-sends the growing conversation (mostly as cache reads), so
+    // per-session context creeps up between turns and drops on "compaction" —
+    // that drift toward the radar's edge and snap back is the point of it.
+    const limit = s.model.includes("gemini") ? 1_000_000 : s.model.includes("gpt") ? 128_000 : 200_000;
+    let ctx = demoCtx.get(s.sid) ?? rint(8_000, limit * 0.5);
+    ctx += rint(3_000, 14_000);
+    if (ctx > limit * 0.92) ctx = rint(limit * 0.2, limit * 0.35); // compacted
+    demoCtx.set(s.sid, ctx);
+    const input = rint(1_000, 6_000);
+    return mkEvent({
+      ...base, hook_event_type: "Turn complete", cost_usd: Number(rnd(0.4, 9).toFixed(2)),
+      input_tokens: input, cache_read_tokens: Math.max(0, ctx - input), output_tokens: rint(500, 6000),
+    });
+  }
   if (roll < 0.8) return mkEvent({ ...base, hook_event_type: "SubagentStop", agent_id: uid(), agent_type: pick(["Explore", "workflow-subagent", "general-purpose"]), cost_usd: Number(rnd(0.1, 2).toFixed(3)) });
   if (roll < 0.88) return mkEvent({ ...base, source_app: "sandbox", session_id: uid(), hook_event_type: "SessionStart" });
   if (roll < 0.95) return mkEvent({ ...base, hook_event_type: "Notification", payload: { message: "Agent is waiting for your input", notification_type: "idle_prompt" } });
