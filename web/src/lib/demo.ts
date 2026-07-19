@@ -58,6 +58,11 @@ const SKILL_NAMES = ["pr-summary", "code-review", "test-scaffold", "dep-upgrade"
 
 let idc = 1000;
 const demoCtx = new Map<string, number>(); // session → simulated context size
+// Pre events waiting for their Post. Without this the demo emitted Pres and
+// Posts with unrelated tool_use_ids, so nothing ever paired: every Pre stayed
+// a pulsing "Running…" row forever and no demo session could reach idle —
+// the showcase demonstrating exactly the wrong behavior.
+const openPres: { app: string; sid: string; model: string; tool: string; tuid: string }[] = [];
 function mkEvent(o: Partial<WatchEvent> & { source_app: string; session_id: string; hook_event_type: string }): WatchEvent {
   return {
     id: ++idc,
@@ -71,6 +76,17 @@ function mkEvent(o: Partial<WatchEvent> & { source_app: string; session_id: stri
 
 /** One plausible event for the live stream (weighted toward tool activity). */
 function nextEvent(): WatchEvent {
+  // Resolve an open Pre first, most of the time — running rows should morph
+  // into finished ones within a few ticks, the way the real pairing behaves.
+  if (openPres.length && (Math.random() < 0.45 || openPres.length > 4)) {
+    const p = openPres.shift()!;
+    return mkEvent({
+      source_app: p.app, session_id: p.sid, model_name: p.model, timestamp: Date.now(),
+      hook_event_type: "PostToolUse", tool_name: p.tool, tool_use_id: p.tuid,
+      duration_ms: rint(300, p.tool === "Bash" ? 6000 : 900),
+      payload: { tool_name: p.tool },
+    });
+  }
   const s = pick(SESSIONS);
   const base = { source_app: s.app, session_id: s.sid, model_name: s.model, timestamp: Date.now() };
   const roll = Math.random();
@@ -88,7 +104,9 @@ function nextEvent(): WatchEvent {
   if (roll < 0.62) {
     const tool = pick(["Bash", "Read", "Edit"]);
     const detail = tool === "Bash" ? pick(BASHES) : pick(PATHS);
-    return mkEvent({ ...base, hook_event_type: "PreToolUse", tool_name: tool, tool_use_id: uid(), payload: { tool_name: tool, tool_input: tool === "Bash" ? { command: detail } : { file_path: detail } } });
+    const tuid = uid();
+    openPres.push({ app: s.app, sid: s.sid, model: s.model, tool, tuid });
+    return mkEvent({ ...base, hook_event_type: "PreToolUse", tool_name: tool, tool_use_id: tuid, payload: { tool_name: tool, tool_input: tool === "Bash" ? { command: detail } : { file_path: detail } } });
   }
   if (roll < 0.72) {
     // Each turn re-sends the growing conversation (mostly as cache reads), so

@@ -21,7 +21,7 @@ import { maybeAlert } from "./alerts.ts";
 import { getSkills, catalogMarkdown, catalogCsv } from "./skills.ts";
 import { getInsights } from "./insights.ts";
 import { getUsage } from "./usage.ts";
-import { submitGate, decideGate, pendingGates } from "./gate.ts";
+import { submitGate, decideGate, pendingGates, GATE_MAX_MS } from "./gate.ts";
 import { otlpTracesToEvents, otlpLogsToEvents } from "./otlp.ts";
 import { decodeOtlpTraces, decodeOtlpLogs } from "./otlp_pb.ts";
 import { statusForPaths, commit as gitCommit, COMMIT_ENABLED } from "./git.ts";
@@ -343,7 +343,7 @@ const server = Bun.serve<WsData>({
       const summary = String(ti.command || ti.file_path || ti.path || ti.pattern || ti.query || ti.description || b.tool_name || "").slice(0, 300);
       const decision = await submitGate(
         { source_app: String(b.source_app || "unknown"), session_id: String(b.session_id || "unknown"), tool_name: String(b.tool_name || "?"), summary },
-        Math.min(120_000, Number(b.timeout_ms) || 60_000)
+        Math.min(GATE_MAX_MS, Number(b.timeout_ms) || 60_000)
       );
       return json(decision);
     }

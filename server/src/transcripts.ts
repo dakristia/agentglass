@@ -510,6 +510,12 @@ export function startScanner(onLive: (r: InsertResult) => void): void {
     return;
   }
   const t0 = Date.now();
+  // The startup backfill holds the same busy flag as every other sweep. It
+  // didn't once, and a /workspace switch during a long cold-start backfill
+  // kicked off a second concurrent scanOnce over the same files — both saw
+  // "no row yet" for a transcript, both inserted its lines, and every count,
+  // token and dollar for those sessions was silently doubled in the DB.
+  sweepBusy = true;
   scanOnce(null)
     .then((n) => {
       const projects = projectPaths.size;
@@ -528,5 +534,6 @@ export function startScanner(onLive: (r: InsertResult) => void): void {
         }
       }, POLL_MS);
     })
-    .catch((e) => console.error(`[scan] initial sweep failed: ${e}`));
+    .catch((e) => console.error(`[scan] initial sweep failed: ${e}`))
+    .finally(() => { sweepBusy = false; });
 }

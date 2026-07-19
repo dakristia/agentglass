@@ -232,7 +232,11 @@ export function TerminalPanel({ open, onClose }: { open: boolean; onClose: () =>
     if (!open) return;
     api.gitRepos().then(({ repos }) => {
       setRepos(repos);
-      setRoot((cur) => (cur && repos.some((r) => r.root === cur) ? cur : repos[0]?.root || cur));
+      // When the scoped repo list doesn't contain the remembered root, DROP it
+      // rather than keep it: a stale localStorage root from a previous scope
+      // would silently open shells (and list commands) in an out-of-scope repo
+      // while the header claims "pick a repo".
+      setRoot((cur) => (cur && repos.some((r) => r.root === cur) ? cur : repos[0]?.root || ""));
     }).catch(() => {});
   }, [open]);
   useEffect(() => { if (root) { try { localStorage.setItem(ROOT_KEY, root); } catch { /* ignore */ } } }, [root]);
@@ -389,7 +393,7 @@ export function TerminalPanel({ open, onClose }: { open: boolean; onClose: () =>
                         <input autoFocus value={repoQuery} onChange={(e) => setRepoQuery(e.target.value)} placeholder="filter repos…" className="m-1.5 px-2.5 py-1.5 rounded-md text-[11px] outline-none shrink-0" style={{ background: "color-mix(in srgb, var(--bg3) 50%, transparent)", border: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", color: "var(--text)" }} />
                         <div className="agx-scroll overflow-y-auto pb-1" style={{ minHeight: 0 }}>
                           {repos.filter((r) => { const q = repoQuery.trim().toLowerCase(); return !q || (r.name + " " + r.branch).toLowerCase().includes(q); }).map((r) => {
-                            const live = sessions.get(r.root)?.status === "live";
+                            const live = sessionsFor(r.root).some((s) => s.status === "live");
                             return (
                               <button key={r.root} onClick={() => { setRoot(r.root); setRepoOpen(false); setRepoQuery(""); }} className="w-full text-left px-2.5 py-1.5 flex items-center gap-2" style={{ background: r.root === root ? "color-mix(in srgb, var(--primary) 15%, transparent)" : "transparent" }}>
                                 <span className="min-w-0 flex-1 truncate font-medium" style={{ color: "var(--text)" }}>{r.name}{live && <span title="live shell" style={{ color: "var(--success, #98c379)" }}> ●</span>}</span>
