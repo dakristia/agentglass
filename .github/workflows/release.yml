@@ -1,0 +1,23 @@
+name: Release
+
+# Every annotated tag vX.Y.Z becomes a GitHub Release, with the tag's
+# annotation message as the release notes — write the notes once, in the tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the real tag object, not a shallow peel
+      - name: Extract tag annotation as release notes
+        run: git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > /tmp/notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/notes.md
