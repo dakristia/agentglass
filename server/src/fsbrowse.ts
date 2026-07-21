@@ -28,7 +28,7 @@
 
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, join, dirname, basename, sep } from "node:path";
+import { resolve, join, dirname, basename, sep, isAbsolute } from "node:path";
 import { SKIP_DIRS } from "./gitwork.ts";
 import type { FsEntry, FsCompletion } from "../../shared/types.ts";
 
@@ -74,13 +74,15 @@ export function splitPrefix(input: unknown): { dir: string; partial: string } | 
   if (input.includes("\0")) return null;
   const raw = input.trim();
   if (!raw) return null;
-  if (!raw.startsWith("/") && !raw.startsWith("~")) return null;
+  // Absolute only (or `~`-rooted). isAbsolute — not startsWith("/") — so a
+  // Windows drive path (C:\… or C:/…) is accepted while relatives still aren't.
+  if (!isAbsolute(raw) && !raw.startsWith("~")) return null;
   const expanded = expandHome(raw);
-  if (!expanded.startsWith("/")) return null; // `~foo` — another user's home, not ours to guess
+  if (!isAbsolute(expanded)) return null; // `~foo` — another user's home, not ours to guess
   // Ask the *raw* input about the trailing separator: join() drops it while
   // expanding `~/`, which would turn "list my home" into "filter /home by my
   // username". Bare `~` counts as committed for the same reason.
-  const committed = raw.endsWith("/") || raw === "~";
+  const committed = raw.endsWith("/") || raw.endsWith(sep) || raw === "~";
   // resolve() collapses `.`, `..` and doubled separators, so what we list is
   // always the real target rather than a path that merely spells it.
   if (committed) return { dir: resolve(expanded), partial: "" };

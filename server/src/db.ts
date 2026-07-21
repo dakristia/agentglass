@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type {
   WatchEvent,
   SessionRollup,
@@ -187,7 +187,9 @@ function providerScope(provider?: string | null): { clause: string; args: string
  *  honestly narrow. Empty clause when unscoped — the whole-machine view. */
 export function scopeClause(scope: string | null = workspaceRoot()): { clause: string; args: string[] } {
   if (!scope) return { clause: "", args: [] };
-  const under = scope + "/%";
+  // Native separator: stored paths and `scope` both come from resolve(), so on
+  // Windows they use "\" — a "/" pattern would match nothing under the root.
+  const under = scope + sep + "%";
   return {
     clause: " AND (project_path = ? OR project_path LIKE ? OR cwd_path = ? OR cwd_path LIKE ?)",
     args: [scope, under, scope, under],
@@ -197,7 +199,7 @@ export function scopeClause(scope: string | null = workspaceRoot()): { clause: s
 /** Same restriction for the `sessions` table, which carries its own column. */
 function sessionScopeClause(scope: string | null = workspaceRoot()): { clause: string; args: string[] } {
   return scope
-    ? { clause: " AND (project_path = ? OR project_path LIKE ?)", args: [scope, scope + "/%"] }
+    ? { clause: " AND (project_path = ? OR project_path LIKE ?)", args: [scope, scope + sep + "%"] }
     : { clause: "", args: [] };
 }
 

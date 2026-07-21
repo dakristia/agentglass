@@ -8,7 +8,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, relative, isAbsolute } from "node:path";
 
 export const CONFIG_PATH = join(
   process.env.XDG_CONFIG_HOME || join(homedir(), ".config"),
@@ -90,7 +90,12 @@ export function inScope(path: string | null | undefined, scope = workspaceRoot()
   if (!scope) return true; // whole-machine: nothing to enforce
   if (!path) return false;
   const p = resolve(expand(path));
-  return p === scope || p.startsWith(scope + "/");
+  if (p === scope) return true;
+  // Not a string prefix: on Windows resolve() yields "\" separators, so
+  // scope + "/" never matches. relative() is separator- and (on win32)
+  // case-correct; a path under scope has a relative that doesn't climb out.
+  const rel = relative(scope, p);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 /** One rule for turning "what the user asked for" into a scope directory —
