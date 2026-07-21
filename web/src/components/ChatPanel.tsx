@@ -257,6 +257,7 @@ export function ChatPanel({ open, onClose, focusId }: { open: boolean; onClose: 
   const chats = useSyncExternalStore(subscribe, listChats, listChats);
   const [activeId, setActiveId] = useState("");
   const [repos, setRepos] = useState<GitRepoRef[]>([]);
+  const [scanning, setScanning] = useState(false);
   const [enabled, setEnabled] = useState(true);
   // The server silently downgrades bypassPermissions unless the operator opted
   // in (AGENTGLASS_CHAT_BYPASS=1) — don't offer a mode that wouldn't stick.
@@ -469,6 +470,17 @@ export function ChatPanel({ open, onClose, focusId }: { open: boolean; onClose: 
     [repos]
   );
 
+  // Full disk scan for repos the cheap open-time list missed. Manual on purpose:
+  // the walk is slow and hydrates OneDrive Files-On-Demand placeholders.
+  const rescan = () => {
+    if (scanning) return;
+    setScanning(true);
+    api.gitRepos(true)
+      .then(({ repos }) => { setRepos(repos); setDefaultCwd((c) => c || repos[0]?.root || ""); })
+      .catch(() => {})
+      .finally(() => setScanning(false));
+  };
+
   return (
     <Portal>
       <AnimatePresence>
@@ -520,6 +532,10 @@ export function ChatPanel({ open, onClose, focusId }: { open: boolean; onClose: 
                       <>
                         <Select value={active.cwd} onChange={(v) => { update(active.id, (c) => { c.cwd = v; }); setDefaultCwd(v); }}
                           className={selCls} style={selStyle} options={repoOptions} placeholder="pick a repo" />
+                        <button onClick={rescan} disabled={scanning} title="Search the disk for more repos (skipped on open to avoid downloading cloud-synced files)"
+                          className="shrink-0 text-[10px] px-2 py-1 rounded-md" style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--primary) 30%, transparent)", opacity: scanning ? 0.6 : 1 }}>
+                          {scanning ? "scanning…" : "⟳ scan"}
+                        </button>
                         <Select value={active.model} onChange={(v) => update(active.id, (c) => { c.model = v; })}
                           className={selCls} style={selStyle} options={MODELS.map((m) => ({ value: m.id, label: m.label }))} />
                         <Select value={active.mode} onChange={(v) => update(active.id, (c) => { c.mode = v; })}

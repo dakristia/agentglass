@@ -23,6 +23,7 @@ export function ProjectPicker({ open, workspace, onClose }: { open: boolean; wor
   const [query, setQuery] = useState("");
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [error, setError] = useState("");
   // Directory completions for the free-text path box. `sel` is -1 until the user
   // arrows into the list: until then Enter means "open what I typed", which is
@@ -33,12 +34,26 @@ export function ProjectPicker({ open, workspace, onClose }: { open: boolean; wor
   const [sel, setSel] = useState(-1);
   const pathRef = useRef<HTMLInputElement>(null);
 
+  // On open, load only the projects we know without walking the disk (history,
+  // telemetry, the server's own repo). The full recursive scan — which is slow
+  // and hydrates OneDrive placeholders it reads through — runs only when the
+  // user presses Scan below.
   useEffect(() => {
     if (!open) return;
     setError("");
+    setScanning(false);
     setRepos(null);
-    api.gitReposAll().then(({ repos }) => setRepos(repos)).catch(() => setRepos([]));
+    api.gitReposAll(false).then(({ repos }) => setRepos(repos)).catch(() => setRepos([]));
   }, [open]);
+
+  const scan = () => {
+    if (scanning) return;
+    setScanning(true);
+    api.gitReposAll(true)
+      .then(({ repos }) => setRepos(repos))
+      .catch(() => { /* keep the known list on failure */ })
+      .finally(() => setScanning(false));
+  };
 
   // Completions, debounced. Every keystroke is a directory read on the server,
   // and typing a long path would otherwise fire a dozen of them for answers
@@ -149,7 +164,12 @@ export function ProjectPicker({ open, workspace, onClose }: { open: boolean; wor
                 <div className="flex items-center gap-3 px-5 py-3 border-b shrink-0" style={{ borderColor: "color-mix(in srgb, var(--border) 40%, transparent)" }}>
                   <span className="text-[15px] font-semibold" style={{ color: "var(--text)" }}>⌂ Open a project</span>
                   <span className="text-[11px] t-dim2">a project — or a folder your projects live in</span>
-                  <button onClick={close} className="ml-auto text-[18px] leading-none px-2 t-dim2 hover:opacity-70">✕</button>
+                  <button onClick={scan} disabled={scanning} title="Search the disk for more repos (skipped on open to avoid downloading cloud-synced files)"
+                    className="ml-auto text-[11px] px-2.5 py-1 rounded-lg font-medium shrink-0"
+                    style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--primary) 30%, transparent)", opacity: scanning ? 0.6 : 1 }}>
+                    {scanning ? "scanning…" : "⟳ Scan disk"}
+                  </button>
+                  <button onClick={close} className="text-[18px] leading-none px-2 t-dim2 hover:opacity-70">✕</button>
                 </div>
 
                 <div className="px-4 pt-3 shrink-0">
@@ -171,8 +191,8 @@ export function ProjectPicker({ open, workspace, onClose }: { open: boolean; wor
                     {!workspace && <span className="text-[9.5px] px-1.5 py-0.5 rounded-full" style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 15%, transparent)" }}>current</span>}
                   </button>
 
-                  {repos === null && <div className="px-3 py-3 text-[11px] t-dim2">looking for repos…</div>}
-                  {repos !== null && !shown.length && <div className="px-3 py-3 text-[11px] t-dim2">no repos found{terms.length ? " for that filter" : ""}</div>}
+                  {repos === null && <div className="px-3 py-3 text-[11px] t-dim2">looking for known projects…</div>}
+                  {repos !== null && !shown.length && <div className="px-3 py-3 text-[11px] t-dim2">no repos {terms.length ? "match that filter" : "known yet — press ⟳ Scan disk to search, or type a folder below"}</div>}
                   {shown.map((r) => (
                     <button key={r.root} onClick={() => choose(r.root)} disabled={busy}
                       className="w-full text-left px-3 py-2 rounded-lg flex items-center gap-2.5 hover:bg-[color-mix(in_srgb,var(--primary)_10%,transparent)]"

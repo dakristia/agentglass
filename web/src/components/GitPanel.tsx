@@ -97,6 +97,7 @@ export function GitPanel({ open, onClose }: { open: boolean; onClose: () => void
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
   const [repoOpen, setRepoOpen] = useState(false);
   const [repoQuery, setRepoQuery] = useState("");
+  const [scanning, setScanning] = useState(false);
   // branches / log / stashes / worktrees
   const [branchData, setBranchData] = useState<{ current: string; branches: GitBranch[] }>({ current: "", branches: [] });
   const [newBranch, setNewBranch] = useState("");
@@ -140,6 +141,17 @@ export function GitPanel({ open, onClose }: { open: boolean; onClose: () => void
     catch (e) { if (seq === treeSeq.current) flash(false, String(e)); }
   }, []);
   const rel = (c: GitFileChange) => (c.file_path.startsWith(root + "/") ? c.file_path.slice(root.length + 1) : c.file_path);
+
+  // Full disk scan for repos the cheap open-time list didn't include. Kept
+  // manual: the walk is slow and hydrates OneDrive Files-On-Demand placeholders.
+  const rescan = () => {
+    if (scanning) return;
+    setScanning(true);
+    api.gitRepos(true)
+      .then(({ repos }) => { setRepos(repos); setRoot((cur) => cur || repos[0]?.root || ""); })
+      .catch((e) => flash(false, String(e)))
+      .finally(() => setScanning(false));
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -302,8 +314,13 @@ export function GitPanel({ open, onClose }: { open: boolean; onClose: () => void
                               {r.dirty > 0 && <span className="shrink-0 text-[9px] tabular-nums" style={{ color: "var(--warning)" }}>●{r.dirty}</span>}
                             </button>
                           ))}
-                          {!repos.length && <div className="px-3 py-2 t-dim2">no repos seen yet</div>}
+                          {!repos.length && <div className="px-3 py-2 t-dim2">no repos known yet — Scan to search the disk</div>}
                         </div>
+                        <button onClick={rescan} disabled={scanning} title="Search the disk for more repos (skipped on open to avoid downloading cloud-synced files)"
+                          className="shrink-0 m-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium text-left"
+                          style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--primary) 30%, transparent)", opacity: scanning ? 0.6 : 1 }}>
+                          {scanning ? "scanning…" : "⟳ Scan disk for more"}
+                        </button>
                       </div>
                     )}
                   </div>

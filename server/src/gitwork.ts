@@ -325,10 +325,18 @@ const REPO_CACHE_MS = 5_000;
 // sweep plus a git subprocess per repo).
 const repoCache = new Map<string, { at: number; repos: GitRepoRef[] }>();
 
-export async function discoverRepos(paths: string[], knownRoots: string[] = [], opts: { ignoreScope?: boolean } = {}): Promise<GitRepoRef[]> {
-  // The workspace is part of the key: switching projects at runtime must not
-  // serve the old scope's answer for the next five seconds.
-  const key = [opts.ignoreScope ? "*" : workspaceRoot() ?? "", ...knownRoots].join("\\0");
+// `sweep` is the disk walk: the recursive reposUnder() descent that finds repos
+// no agent has touched yet. It's also the expensive, side-effecting part — on
+// Windows it hydrates OneDrive Files-On-Demand placeholders it reads through —
+// so the UI defaults it OFF (cheap "known projects" only) and turns it on only
+// when the user clicks Scan. Everything else here (the server's own repo, repos
+// with history, telemetry, env) needs no walk and always runs.
+export async function discoverRepos(paths: string[], knownRoots: string[] = [], opts: { ignoreScope?: boolean; sweep?: boolean } = {}): Promise<GitRepoRef[]> {
+  const sweep = opts.sweep ?? true;
+  // The workspace and the sweep flag are part of the key: switching projects at
+  // runtime, or asking for a full scan right after a cheap one, must not be
+  // served the previous answer for the next five seconds.
+  const key = [opts.ignoreScope ? "*" : workspaceRoot() ?? "", sweep ? "S" : "s", ...knownRoots].join("\\0");
   const hit = repoCache.get(key);
   if (hit && Date.now() - hit.at < REPO_CACHE_MS) return hit.repos;
   if (repoCache.size > 8) repoCache.clear(); // scope churn — don't hoard stale lists
@@ -349,7 +357,7 @@ export async function discoverRepos(paths: string[], knownRoots: string[] = [], 
     // folder brings every repo found from that folder inward, and nothing else.
     const found = self
       ? [self, ...worktrees(self).map((w) => w.path).filter((p) => p && p !== self)]
-      : reposUnder(only1);
+      : (sweep ? reposUnder(only1) : []); // a container-folder scope needs the walk to enumerate; no-sweep shows nothing until Scan
     const refs = await Promise.all(found.map((r) => repoRef(r)));
     const scoped = refs.filter((r): r is GitRepoRef => !!r);
     scoped.sort((a, b) => b.dirty - a.dirty || a.name.localeCompare(b.name));
@@ -366,7 +374,7 @@ export async function discoverRepos(paths: string[], knownRoots: string[] = [], 
   // end.
   const only = configuredRepoDirs();
   const selfRoot = repoRootOf(process.cwd());
-  if (selfRoot) { roots.add(selfRoot); for (const r of reposUnder(dirname(selfRoot))) roots.add(r); }
+  if (selfRoot) { roots.add(selfRoot); if (sweep) for (const r of reposUnder(dirname(selfRoot))) roots.add(r); }
   for (const r of knownRoots) { const a = safeAbs(r); if (a && repoRoot(a)) roots.add(a); }
   // Where to sweep for repos no agent has touched yet — without this the panel
   // only offers projects that already have history, which is the wrong way
@@ -377,7 +385,7 @@ export async function discoverRepos(paths: string[], knownRoots: string[] = [], 
   // for an unconfigured install, and it can do no better than guess from the
   // directories that happen to hold existing projects.
   const bases = only.length ? only : codeRootsOf(knownRoots);
-  for (const base of bases) for (const r of reposUnder(base)) roots.add(r);
+  if (sweep) for (const base of bases) for (const r of reposUnder(base)) roots.add(r);
   // env overrides for repos that live elsewhere
   for (const p of (process.env.AGENTGLASS_REPOS || "").split(":").filter(Boolean)) { const r = repoRootOf(p); if (r) roots.add(r); }
   // repos seen in recent telemetry — dedupe by parent dir first so this is one
