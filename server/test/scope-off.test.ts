@@ -8,6 +8,7 @@
 // scope loaded first and assert nothing. scope.test.ts owns the integration
 // side; this owns the shape of the filter itself.
 import { describe, expect, test } from "bun:test";
+import { sep } from "node:path";
 import { scopeClause } from "../src/db.ts";
 
 describe("scopeClause", () => {
@@ -24,12 +25,9 @@ describe("scopeClause", () => {
     const { clause, args } = scopeClause("/home/dev/proj");
     expect(clause).toContain("project_path = ?");
     expect(clause).toContain("project_path LIKE ?");
-    expect(args).toEqual([
-      "/home/dev/proj",
-      "/home/dev/proj/%",
-      "/home/dev/proj",
-      "/home/dev/proj/%",
-    ]);
+    // The LIKE prefix uses the platform separator (native paths on Windows).
+    const under = `/home/dev/proj${sep}%`;
+    expect(args).toEqual(["/home/dev/proj", under, "/home/dev/proj", under]);
   });
 
   test("consults cwd as well as the resolved repo root", () => {
@@ -41,7 +39,7 @@ describe("scopeClause", () => {
   test("the LIKE prefix cannot match a sibling with a shared name", () => {
     // "/code/app" must not drag in "/code/app-backup" — hence the trailing "/".
     const [, like] = scopeClause("/code/app").args;
-    expect(like).toBe("/code/app/%");
+    expect(like).toBe(`/code/app${sep}%`);
     expect("/code/app-backup/file".startsWith("/code/app/")).toBe(false);
   });
 

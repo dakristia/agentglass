@@ -6,10 +6,13 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { completePath, splitPrefix } from "../src/fsbrowse.ts";
 
 let base = "";
+// Windows refuses symlink creation without a privilege (EPERM). Track it so the
+// symlink-specific cases skip instead of taking the whole suite down in beforeAll.
+let haveSymlinks = true;
 beforeAll(() => {
   base = mkdtempSync(join(tmpdir(), "agx-fsbrowse-"));
   for (const d of ["alpha", "alavera_app", "alavera_api", "beta", ".hidden", "node_modules"]) {
@@ -18,8 +21,12 @@ beforeAll(() => {
   mkdirSync(join(base, "alavera_app", ".git"));
   writeFileSync(join(base, "a-file.txt"), "not a directory");
   writeFileSync(join(base, "alpha", "secret.env"), "TOKEN=hunter2");
-  symlinkSync(join(base, "alpha"), join(base, "alink"));
-  symlinkSync(join(base, "a-file.txt"), join(base, "afilelink"));
+  try {
+    symlinkSync(join(base, "alpha"), join(base, "alink"));
+    symlinkSync(join(base, "a-file.txt"), join(base, "afilelink"));
+  } catch {
+    haveSymlinks = false;
+  }
 });
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
@@ -42,13 +49,15 @@ describe("splitPrefix", () => {
   });
 
   test("a trailing slash lists inside; anything else filters the last segment", () => {
-    expect(splitPrefix("/usr/local/")).toEqual({ dir: "/usr/local", partial: "" });
-    expect(splitPrefix("/usr/loc")).toEqual({ dir: "/usr", partial: "loc" });
+    // resolve() gives native separators (and a drive on Windows); assert against
+    // it so the split point is what's under test, not the platform's path shape.
+    expect(splitPrefix("/usr/local/")).toEqual({ dir: resolve("/usr/local"), partial: "" });
+    expect(splitPrefix("/usr/loc")).toEqual({ dir: resolve("/usr"), partial: "loc" });
   });
 
   test("`..` and doubled separators are collapsed, so the listed dir is the real one", () => {
-    expect(splitPrefix("/usr/local/../")).toEqual({ dir: "/usr", partial: "" });
-    expect(splitPrefix("//usr///local/")).toEqual({ dir: "/usr/local", partial: "" });
+    expect(splitPrefix("/usr/local/../")).toEqual({ dir: resolve("/usr"), partial: "" });
+    expect(splitPrefix("//usr///local/")).toEqual({ dir: resolve("//usr///local/"), partial: "" });
   });
 
   test("~ expands to the home directory; ~otheruser does not", () => {
@@ -92,13 +101,14 @@ describe("completePath", () => {
   });
 
   test("symlinked directories are offered — code on another disk is a normal setup", () => {
+    if (!haveSymlinks) return; // no symlink privilege (Windows) — nothing to assert
     expect(names(base + "/")).toContain("alink");
   });
 
   test("an unreadable or missing directory answers empty rather than throwing", () => {
     const out = completePath(base + "/does-not-exist/");
     expect(out.entries).toEqual([]);
-    expect(out.base).toBe(base + "/does-not-exist");
+    expect(out.base).toBe(join(base, "does-not-exist"));
   });
 
   test("paths returned are absolute and joined to the resolved base", () => {

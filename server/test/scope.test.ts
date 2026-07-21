@@ -11,7 +11,7 @@
 import { describe, expect, test, beforeAll } from "bun:test";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 
 // Both are read once at module load inside db.ts / config.ts, so they have to
 // be set before the dynamic import below — not at the top of a normal import.
@@ -36,7 +36,7 @@ process.env.XDG_CONFIG_HOME = dir;
 let db: typeof import("../src/db.ts");
 
 const event = (project: string, session: string, over: Record<string, unknown> = {}) => ({
-  source_app: project.split("/").pop()!,
+  source_app: basename(project),
   session_id: session,
   hook_event_type: "PostToolUse",
   tool_name: "Bash",
@@ -61,7 +61,7 @@ beforeAll(async () => {
   db.insertEvent(event(OTHER, "s-out-1") as any);
   db.insertEvent(event(OTHER, "s-out-2") as any);
   // project_path is outside the scope, but the turn ran inside it — must count.
-  db.insertEvent(event(MONO, "s-worktree", { cwd: SCOPED + "/wt/feature" }) as any);
+  db.insertEvent(event(MONO, "s-worktree", { cwd: join(SCOPED, "wt", "feature") }) as any);
 });
 
 describe("scoped reads", () => {

@@ -2,6 +2,7 @@
 // origin/rebinding address parser, the repo-path boundary, the shell-safe
 // relative-path filter, the Makefile-target parser, and the token check.
 import { describe, expect, test } from "bun:test";
+import { isAbsolute, join } from "node:path";
 import { privateHost } from "../src/net.ts";
 import { safeAbs } from "../src/git.ts";
 import { shellSafeRel, parseMakeTargets } from "../src/terminal.ts";
@@ -50,8 +51,13 @@ describe("safeAbs", () => {
   });
 
   test("normalizes to an absolute path", () => {
-    expect(safeAbs("/a/b/../c")).toBe("/a/c");
-    expect(safeAbs("relative/x")?.startsWith("/")).toBe(true);
+    // Platform-agnostic: the point is the ".." segment collapses and the
+    // result is absolute — the literal string differs (drive + "\" on Windows).
+    const out = safeAbs("/a/b/../c")!;
+    expect(isAbsolute(out)).toBe(true);
+    expect(out).not.toContain("..");
+    expect(out.endsWith(join("a", "c"))).toBe(true); // b dropped, c kept under a
+    expect(isAbsolute(safeAbs("relative/x")!)).toBe(true);
   });
 });
 
