@@ -13,10 +13,10 @@
     "start": "cd server && bun run start",
     "build": "cd web && bun run build",
     "install:all": "bun install",
-    "setup": "python3 hooks/install_hooks.py",
-    "setup:undo": "python3 hooks/install_hooks.py --uninstall",
-    "connect": "python3 hooks/connect_otel.py",
-    "connect:undo": "python3 hooks/connect_otel.py --undo",
+    "setup": "node hooks/run_py.mjs install_hooks.py",
+    "setup:undo": "node hooks/run_py.mjs install_hooks.py --uninstall",
+    "connect": "node hooks/run_py.mjs connect_otel.py",
+    "connect:undo": "node hooks/run_py.mjs connect_otel.py --undo",
     "postinstall": "node -e \"console.log('agentglass: run [bun run setup] to wire Claude Code hooks, [bun run connect] for OTel CLIs')\""
   },
   "devDependencies": {
