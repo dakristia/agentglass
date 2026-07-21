@@ -56,6 +56,9 @@ export const PRICE_TABLE: ModelPrice[] = [
   { match: ["flash-lite"], label: "Gemini Flash-Lite", input: 0.075, output: 0.3, cache_write: 0, cache_read: 0.01875 },
   { match: ["gemini", "flash"], label: "Gemini Flash", input: 0.15, output: 0.6, cache_write: 0, cache_read: 0.0375 },
 
+  // --- Intility GLM (NOK 15/3/55 per MTok, ~10.5 NOK/USD) ---
+  { match: ["glm"], label: "GLM", input: 1.43, output: 5.24, cache_write: 0, cache_read: 0.29 },
+
   // --- others (approx) ---
   { match: ["deepseek"], label: "DeepSeek", input: 0.27, output: 1.1, cache_write: 0, cache_read: 0.07 },
   { match: ["grok"], label: "Grok", input: 2, output: 10, cache_write: 0, cache_read: 0 },

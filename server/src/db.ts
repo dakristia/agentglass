@@ -156,6 +156,7 @@ export function providerOf(model: string | null | undefined): string | null {
   if (/mistral|mixtral|codestral/.test(m)) return "Mistral";
   if (/llama|meta-/.test(m)) return "Meta";
   if (/command|cohere/.test(m)) return "Cohere";
+  if (/glm/.test(m)) return "Intility";
   return null;
 }
 
