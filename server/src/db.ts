@@ -284,6 +284,10 @@ function safeJson(s: string): Record<string, unknown> {
 const isToolPost = (t: string) => t === "PostToolUse" || t === "PostToolUseFailure";
 const isTerminal = (t: string) => t === "Stop" || t === "SessionEnd" || t === "SubagentStop";
 
+// Tools that block on a human response — their Pre→Post gap measures human
+// reaction time, not tool execution time, so we never pair/aggregate it.
+const INTERACTIVE_TOOLS = new Set(["AskUserQuestion"]);
+
 // ---------------------------------------------------------------------------
 // Retention — keep at least a full week of history so the 7d window is always
 // answerable. Prune anything older than AGENTGLASS_RETENTION_DAYS (default 8;
@@ -335,7 +339,7 @@ export function insertEvent(n: NormalizedEvent): InsertResult {
 
   // --- latency pairing ----------------------------------------------------
   let duration_ms: number | null = null;
-  if (isToolPost(n.hook_event_type)) {
+  if (isToolPost(n.hook_event_type) && !(n.tool_name && INTERACTIVE_TOOLS.has(n.tool_name))) {
     let pre: { timestamp: number } | null = null;
     if (n.tool_use_id) pre = findPreById.get(n.tool_use_id) ?? null;
     if (!pre && n.tool_name) pre = findPreByTool.get(n.session_id, n.tool_name, n.timestamp) ?? null;
