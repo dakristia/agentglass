@@ -532,7 +532,7 @@ export function ChatPanel({ open, onClose, focusId }: { open: boolean; onClose: 
                       <>
                         <Select value={active.cwd} onChange={(v) => { update(active.id, (c) => { c.cwd = v; }); setDefaultCwd(v); }}
                           className={selCls} style={selStyle} options={repoOptions} placeholder="pick a repo" />
-                        <button onClick={rescan} disabled={scanning} title="Search the disk for more repos (skipped on open to avoid downloading cloud-synced files)"
+                        <button onClick={rescan} disabled={scanning} title="Search the disk for more repos"
                           className="shrink-0 text-[10px] px-2 py-1 rounded-md" style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--primary) 30%, transparent)", opacity: scanning ? 0.6 : 1 }}>
                           {scanning ? "scanning…" : "⟳ scan"}
                         </button>

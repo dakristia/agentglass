@@ -164,7 +164,7 @@ export function ProjectPicker({ open, workspace, onClose }: { open: boolean; wor
                 <div className="flex items-center gap-3 px-5 py-3 border-b shrink-0" style={{ borderColor: "color-mix(in srgb, var(--border) 40%, transparent)" }}>
                   <span className="text-[15px] font-semibold" style={{ color: "var(--text)" }}>⌂ Open a project</span>
                   <span className="text-[11px] t-dim2">a project — or a folder your projects live in</span>
-                  <button onClick={scan} disabled={scanning} title="Search the disk for more repos (skipped on open to avoid downloading cloud-synced files)"
+                  <button onClick={scan} disabled={scanning} title="Search the disk for more repos"
                     className="ml-auto text-[11px] px-2.5 py-1 rounded-lg font-medium shrink-0"
                     style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--primary) 30%, transparent)", opacity: scanning ? 0.6 : 1 }}>
                     {scanning ? "scanning…" : "⟳ Scan disk"}

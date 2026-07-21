@@ -316,7 +316,7 @@ export function GitPanel({ open, onClose }: { open: boolean; onClose: () => void
                           ))}
                           {!repos.length && <div className="px-3 py-2 t-dim2">no repos known yet — Scan to search the disk</div>}
                         </div>
-                        <button onClick={rescan} disabled={scanning} title="Search the disk for more repos (skipped on open to avoid downloading cloud-synced files)"
+                        <button onClick={rescan} disabled={scanning} title="Search the disk for more repos"
                           className="shrink-0 m-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium text-left"
                           style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--primary) 30%, transparent)", opacity: scanning ? 0.6 : 1 }}>
                           {scanning ? "scanning…" : "⟳ Scan disk for more"}
