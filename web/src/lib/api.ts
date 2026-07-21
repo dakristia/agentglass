@@ -159,9 +159,13 @@ const realApi = {
   /** Subdirectories matching a half-typed path — the picker's completion. */
   fsComplete: (prefix: string) => get<FsCompletion>(`/fs/complete?prefix=${encodeURIComponent(prefix)}`),
   // --- live git panel (lazygit-style) ---
-  gitRepos: () => get<{ repos: GitRepoRef[] }>("/git/repos"),
-  /** Every repo on the machine — for the project picker, even when scoped. */
-  gitReposAll: () => get<{ repos: GitRepoRef[] }>("/git/repos?all=1"),
+  /** Repos in the current scope. `sweep` off (default) returns only the ones we
+   *  know without a disk walk — history, telemetry, the server's own repo; on
+   *  runs the full recursive scan (slower, hydrates OneDrive placeholders). */
+  gitRepos: (sweep = false) => get<{ repos: GitRepoRef[] }>(`/git/repos${sweep ? "?sweep=1" : "?sweep=0"}`),
+  /** Every repo on the machine — for the project picker, even when scoped.
+   *  Same sweep semantics as gitRepos. */
+  gitReposAll: (sweep = false) => get<{ repos: GitRepoRef[] }>(`/git/repos?all=1${sweep ? "&sweep=1" : "&sweep=0"}`),
   gitTree: (root: string) => get<WorkingTree>(`/git/tree?root=${encodeURIComponent(root)}`),
   gitStage: (root: string, paths: string[]) => post<GitActionResult>("/git/stage", { root, paths }),
   gitUnstage: (root: string, paths: string[]) => post<GitActionResult>("/git/unstage", { root, paths }),
@@ -263,8 +267,8 @@ const demoApi: typeof realApi = {
   setWorkspace: (_root: string | null) => D({ ok: false, workspace: null, persisted: false, error: "unavailable in the demo" }),
   // The demo has no filesystem to browse, so completion is simply always empty.
   fsComplete: (_prefix: string) => D({ base: "", entries: [], truncated: false }),
-  gitRepos: () => D(demo.gitRepos()),
-  gitReposAll: () => D(demo.gitRepos()),
+  gitRepos: (_sweep = false) => D(demo.gitRepos()),
+  gitReposAll: (_sweep = false) => D(demo.gitRepos()),
   gitTree: (root: string) => D(demo.gitTree(root)),
   gitStage: (_root: string, _paths: string[]) => D(demo.gitActionUnavailable()),
   gitUnstage: (_root: string, _paths: string[]) => D(demo.gitActionUnavailable()),

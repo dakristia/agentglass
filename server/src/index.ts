@@ -403,7 +403,11 @@ const server = Bun.serve<WsData>({
       // `all=1` is the project picker: it needs the whole machine even when the
       // cockpit is currently scoped to one project, or there'd be no way out.
       const ignoreScope = url.searchParams.get("all") === "1";
-      return json({ repos: await discoverRepos(paths, knownProjects().map((p) => p.path), { ignoreScope }) });
+      // `sweep=0` skips the recursive disk walk (the expensive, OneDrive-
+      // hydrating part): the UI asks for it on open, then requests a full sweep
+      // only when the user clicks Scan. Absent/anything-else keeps the walk.
+      const sweep = url.searchParams.get("sweep") !== "0";
+      return json({ repos: await discoverRepos(paths, knownProjects().map((p) => p.path), { ignoreScope, sweep }) });
     }
     // Directory completion for the project picker's free-text path input. A
     // plain read, so the surface-wide origin/rebinding/token gate above is the
