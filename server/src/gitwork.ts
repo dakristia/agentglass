@@ -4,8 +4,9 @@
 // (never a shell string); paths are validated to stay inside the repo root; and
 // every mutating op is gated by AGENTGLASS_GIT_WRITE_DISABLED=1.
 
-import { resolve, basename, relative, dirname, sep } from "node:path";
+import { resolve, basename, relative, dirname, sep, parse } from "node:path";
 import { statSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { git, gitAsync, safeAbs, repoRootOf, currentBranch } from "./git.ts";
 import { configuredRepoDirs, workspaceRoot, inScope } from "./config.ts";
 import type {
@@ -239,14 +240,48 @@ function reposUnder(baseDir: string, depth = REPO_SCAN_DEPTH): string[] {
  * directly in one of those (a home directory that is itself a repo) still gets
  * listed on its own — it just doesn't drag its neighbours in.
  */
+// Unix system roots that hold other users, mounts or the OS rather than one
+// person's projects. Windows equivalents (drive roots, the home dir, the users
+// container) are recognised structurally in isTooBroadBase, since they vary per
+// machine and can't be listed.
+const TOO_BROAD = new Set(["/", "/home", "/mnt", "/media", "/run", "/usr", "/opt", "/var", "/tmp", "/etc", "/srv"]);
+
+// Windows paths are case-insensitive; drive letters especially come back in
+// either case (`C:\` vs `c:\`) depending on who resolved them.
+const sameDir = (a: string, b: string) =>
+  process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+
+/**
+ * A directory we must never sweep for repos.
+ *
+ * The old guard was a POSIX-only list, so on Windows `C:\`, `C:\Users` and the
+ * home directory all passed. A single Claude session run in `~` then made the
+ * home dir a known project, whose parent `C:\Users` became a sweep base —
+ * `reposUnder` walked every user *and* descended into OneDrive, whose
+ * Files-On-Demand hydrates (downloads) placeholders the moment they're read.
+ *
+ * The real rule isn't a list of names, it's structural: never sweep a
+ * filesystem/drive root, the home directory itself (it holds OneDrive, AppData,
+ * caches — none of them "projects"), or the folder that contains every user's
+ * home. A project sitting directly in one of those still gets listed on its own
+ * elsewhere; it just doesn't drag its neighbours in.
+ */
+export function isTooBroadBase(dir: string): boolean {
+  const abs = resolve(dir);
+  if (sameDir(abs, parse(abs).root)) return true; // drive/filesystem root: C:\, /
+  const home = homedir();
+  if (sameDir(abs, home)) return true;            // the home dir itself
+  if (sameDir(abs, dirname(home))) return true;   // the users container: C:\Users, /home, /Users
+  return TOO_BROAD.has(abs);
+}
+
 function codeRootsOf(knownRoots: string[]): string[] {
-  const TOO_BROAD = new Set(["/", "/home", "/mnt", "/media", "/run", "/usr", "/opt", "/var", "/tmp", "/etc", "/srv"]);
   const out = new Set<string>();
   for (const r of knownRoots) {
     const abs = safeAbs(r);
     if (!abs) continue;
     const parent = dirname(abs);
-    if (TOO_BROAD.has(parent) || parent === abs) continue;
+    if (parent === abs || isTooBroadBase(parent)) continue;
     out.add(parent);
   }
   return [...out];
