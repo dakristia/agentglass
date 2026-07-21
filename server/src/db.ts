@@ -142,6 +142,7 @@ db.exec("CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_path)")
 // at upsert and backfilled from the session's events for rows that predate it.
 try { db.exec("ALTER TABLE sessions ADD COLUMN project_path TEXT"); } catch { /* already present */ }
 db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path)");
+try { db.exec("ALTER TABLE sessions ADD COLUMN session_name TEXT"); } catch { /* already present */ }
 db.exec(`
   UPDATE sessions SET project_path = (
     SELECT e.project_path FROM events e
@@ -371,11 +372,11 @@ export function insertEvent(n: NormalizedEvent): InsertResult {
 
 const upsertStmt = db.query(`
   INSERT INTO sessions (
-    session_id, source_app, model_name, provider, project_path, started_at, ended_at, last_seen,
+    session_id, source_app, model_name, provider, project_path, session_name, started_at, ended_at, last_seen,
     event_count, tool_count, error_count,
     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd
   ) VALUES (
-    $sid, $src, $model, $provider, $project, $ts, $ended, $ts,
+    $sid, $src, $model, $provider, $project, $session_name, $ts, $ended, $ts,
     1, $tool, $err,
     $in, $out, $cw, $cr, $cost
   )
@@ -384,6 +385,7 @@ const upsertStmt = db.query(`
     model_name = COALESCE(excluded.model_name, sessions.model_name),
     provider = COALESCE(excluded.provider, sessions.provider),
     project_path = COALESCE(excluded.project_path, sessions.project_path),
+    session_name = COALESCE(excluded.session_name, sessions.session_name),
     ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
     last_seen = excluded.last_seen,
     event_count = sessions.event_count + 1,
@@ -416,6 +418,7 @@ function upsertSession(
     // Carried in the payload by both the scanner and the hooks; null for an
     // event that never recorded where it ran, which COALESCE leaves alone.
     $project: typeof n.payload?.project_path === "string" ? n.payload.project_path : null,
+    $session_name: n.session_name || null,
     $ts: n.timestamp,
     $ended: isTerminal(n.hook_event_type) ? n.timestamp : null,
     $tool: isToolPost(n.hook_event_type) ? 1 : 0,
@@ -1018,6 +1021,7 @@ export function getSession(sessionId: string): import("../../shared/types.ts").S
     input_tokens: agg.input_tokens ?? 0,
     output_tokens: agg.output_tokens ?? 0,
     summary,
+    session_name: roll?.session_name ?? null,
     tool_mix: toolMix,
     subagents: subRows.map((s) => ({ agent_id: s.agent_id, agent_type: s.agent_type || "subagent", events: s.n })),
     conversation: kept,
