@@ -30,6 +30,13 @@ import { workspaceRoot } from "./config.ts";
  * using the local file if one is already there.
  */
 function defaultDbPath(): string {
+  // `bun test` runs every file in one process and this module binds its path
+  // once at import. A test that forgot to set AGENTGLASS_DB — or set it too
+  // late, after another file already imported this module — would otherwise
+  // fall through to the real history DB below and silently write fixtures into
+  // it. An isolated in-memory DB keeps that whole class of leak off disk while
+  // still letting a test opt into a real file by setting AGENTGLASS_DB.
+  if (process.env.NODE_ENV === "test") return ":memory:";
   const local = resolve("agentglass.db");
   if (existsSync(local)) return local;
   const base =
