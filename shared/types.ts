@@ -25,6 +25,7 @@ export interface IngestBody {
   chat?: unknown[];
   summary?: string;
   model_name?: string;
+  session_name?: string;
   timestamp?: number; // ms; server stamps if absent
 }
 
@@ -70,6 +71,7 @@ export interface SessionRollup {
   cache_creation_tokens: number;
   cache_read_tokens: number;
   cost_usd: number;
+  session_name?: string | null;
 }
 
 export interface CostByModel {
@@ -273,6 +275,7 @@ export interface SessionDetail {
   input_tokens: number;
   output_tokens: number;
   summary: string | null;
+  session_name?: string | null;
   tool_mix: { tool: string; n: number }[];
   subagents: { agent_id: string; agent_type: string; events: number }[];
   conversation: { role: "user" | "assistant"; text: string; ts: number }[];

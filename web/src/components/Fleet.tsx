@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import type { AgentCard } from "../lib/derive.ts";
 import { Panel } from "./Panel.tsx";
@@ -42,6 +42,15 @@ function Spark({ data, color }: { data: number[]; color: string }) {
 function SessionCard({ a, selected, onSelect }: { a: AgentCard; selected: boolean; onSelect?: (a: AgentCard) => void }) {
   const st = STATUS[a.status];
   const model = modelLabelOf(a.model_name);
+  const [copied, setCopied] = useState(false);
+  const copyId = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(a.session_id).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [a.session_id]);
+  const label = a.session_name ? `${a.source_app}:${a.session_name}` : `${a.source_app}:${a.session_id.slice(0, 8)}`;
   return (
     <motion.div
       onClick={() => onSelect?.(a)}
@@ -72,7 +81,15 @@ function SessionCard({ a, selected, onSelect }: { a: AgentCard; selected: boolea
             )}
             <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{ background: st.color }} />
           </span>
-          <span className="truncate text-[13px]" style={{ color: "var(--text)" }}>{a.key}</span>
+          <span className="truncate text-[13px]" style={{ color: "var(--text)" }}>{label}</span>
+          <button
+            onClick={copyId}
+            className="shrink-0 text-[9px] px-1 py-0.5 rounded t-dim2 hover:t-dim transition-colors"
+            style={{ background: "color-mix(in srgb, var(--text) 8%, transparent)" }}
+            title={`Copy session ID: ${a.session_id}`}
+          >
+            {copied ? "✓" : "⧉"}
+          </button>
         </div>
         <span className="chip shrink-0" style={{ color: "var(--primary)", background: "color-mix(in srgb, var(--primary) 14%, transparent)" }}>{model}</span>
       </div>
@@ -108,6 +125,7 @@ function SessionCard({ a, selected, onSelect }: { a: AgentCard; selected: boolea
 
 export function Fleet({ agents, activeApp, onSelect }: { agents: AgentCard[]; activeApp?: string; onSelect?: (a: AgentCard) => void }) {
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
+  const everLive = useRef(new Set<string>());
 
   // Group sessions by project (source_app); order groups by most-recent activity.
   const groups = useMemo(() => {
@@ -128,7 +146,17 @@ export function Fleet({ agents, activeApp, onSelect }: { agents: AgentCard[]; ac
   }, [agents]);
 
   // A fully-idle group with several sessions collapses by default to cut clutter.
-  const isCollapsed = (app: string, live: number, size: number) => overrides[app] ?? (live === 0 && size > 2);
+  // Once a group has been seen live, it stays expanded (the oscillation between
+  // live/idle on a quiet session is visually jarring). The user's explicit toggle
+  // via overrides always wins.
+  for (const { app, live } of groups) {
+    if (live > 0) everLive.current.add(app);
+  }
+  const isCollapsed = (app: string, live: number, size: number) => {
+    if (overrides[app] !== undefined) return overrides[app];
+    if (everLive.current.has(app)) return false;
+    return live === 0 && size > 2;
+  };
   const toggle = (app: string, def: boolean) => setOverrides((o) => ({ ...o, [app]: !(o[app] ?? def) }));
 
   return (

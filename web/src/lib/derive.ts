@@ -8,6 +8,7 @@ export interface AgentCard {
   source_app: string;
   session_id: string;
   model_name: string | null;
+  session_name: string | null;
   status: AgentStatus;
   lastAction: string;
   lastType: string;
@@ -59,6 +60,7 @@ function blankCard(key: string, source_app: string, session_id: string, model_na
     source_app,
     session_id,
     model_name,
+    session_name: null,
     status: "idle",
     lastAction: "",
     lastType: "",

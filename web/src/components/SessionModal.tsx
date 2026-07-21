@@ -51,7 +51,7 @@ export function SessionModal({ sessionId, sourceApp, onClose, onFilter, onResume
   }, 3000);
 
   const open = !!sessionId;
-  const key = d ? `${d.source_app}:${d.session_id.slice(0, 8)}` : sourceApp ? `${sourceApp}:${sessionId?.slice(0, 8)}` : sessionId?.slice(0, 8) ?? "";
+  const key = d ? (d.session_name ? `${d.source_app}:${d.session_name}` : `${d.source_app}:${d.session_id.slice(0, 8)}`) : sourceApp ? `${sourceApp}:${sessionId?.slice(0, 8)}` : sessionId?.slice(0, 8) ?? "";
   const dur = d ? Math.max(0, d.last_seen - d.started_at) : 0;
   const durLabel = dur > 3_600_000 ? `${(dur / 3_600_000).toFixed(1)}h` : dur > 60_000 ? `${Math.round(dur / 60_000)}m` : `${Math.round(dur / 1000)}s`;
   const toolMax = Math.max(1, ...(d?.tool_mix.map((t) => t.n) ?? [1]));

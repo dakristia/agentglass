@@ -122,7 +122,7 @@ const blockedReason = (s: SessionRollup): Blocked =>
 function ResumeRow({ s, openChatId, onPick }: { s: SessionRollup; openChatId?: string; onPick: () => void }) {
   const why = blockedReason(s);
   const model = modelLabelOf(s.model_name);
-  const label = s.project_path ? repoName(s.project_path) : s.source_app;
+  const label = s.session_name ? `${s.source_app}:${s.session_name}` : (s.project_path ? repoName(s.project_path) : s.source_app);
   const note = why === "live"
     ? "This session is still running. A claude session has a single owner — a second one writing to the same transcript would corrupt its history. Resume it once it stops."
     : why === "no-dir"
@@ -375,7 +375,7 @@ export function ChatPanel({ open, onClose, focusId }: { open: boolean; onClose: 
     const chat = chatResuming(s.session_id)
       ?? newChat(s.project_path, s.model_name || undefined, active?.mode ?? DEFAULT_MODE, {
         sessionId: s.session_id,
-        title: `${s.source_app}:${s.session_id.slice(0, 8)}`,
+        title: s.session_name ? `${s.source_app}:${s.session_name}` : `${s.source_app}:${s.session_id.slice(0, 8)}`,
       });
     setActiveId(chat.id);
     requestAnimationFrame(() => inputRef.current?.focus());

@@ -22,6 +22,7 @@ export interface NormalizedEvent {
    */
   usage_is_cumulative: boolean;
   summary: string | null;
+  session_name: string | null;
   timestamp: number;
   payload: Record<string, unknown>;
   chat: unknown[] | null;
@@ -195,6 +196,7 @@ export function normalize(body: IngestBody): NormalizedEvent {
     usage,
     usage_is_cumulative: !hasPayloadUsage,
     summary: str(body.summary),
+    session_name: str(body.session_name),
     timestamp: typeof body.timestamp === "number" ? body.timestamp : Date.now(),
     payload,
     chat,

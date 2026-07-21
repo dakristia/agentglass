@@ -13,6 +13,13 @@ const INGEST_PATH = "/ingest";
 
 const childSessions = new Set();
 
+const DEFAULT_SESSION_RE = /^(New session - |Child session - )\d{4}-\d{2}-\d{2}T/;
+
+function sessionNameFromInfo(info) {
+  if (!info?.title || DEFAULT_SESSION_RE.test(info.title)) return undefined;
+  return info.title;
+}
+
 async function postEvent(body) {
   try {
     const res = await fetch(`${DEFAULT_URL}${INGEST_PATH}`, {
@@ -204,6 +211,7 @@ export const AgentGlassPlugin = async ({ client, directory, worktree }) => {
             hook_event_type: "SessionStart",
             payload: basePayload,
             model_name: modelLabel(info),
+            session_name: sessionNameFromInfo(info),
           });
           break;
 
@@ -227,6 +235,7 @@ export const AgentGlassPlugin = async ({ client, directory, worktree }) => {
             model_name: info.modelID
               ? `${info.providerID || "unknown"}/${info.modelID}`
               : modelLabel(info),
+            session_name: sessionNameFromInfo(info),
           });
           break;
         }
@@ -241,9 +250,20 @@ export const AgentGlassPlugin = async ({ client, directory, worktree }) => {
             session_id: sessionID || "unknown",
             hook_event_type: "Stop",
             payload: idlePayload,
+            session_name: sessionNameFromInfo(info),
           });
           break;
         }
+
+        case "session.updated":
+          await postEvent({
+            source_app: sourceApp,
+            session_id: sessionID || info?.id || "unknown",
+            hook_event_type: "Notification",
+            payload: basePayload,
+            session_name: sessionNameFromInfo(info),
+          });
+          break;
 
         case "session.error": {
           const errPayload = { ...basePayload };

@@ -36,7 +36,7 @@ import { SessionModal } from "./components/SessionModal.tsx";
 import { ProjectPicker, PICKER_ANSWERED_KEY } from "./components/ProjectPicker.tsx";
 
 export default function App() {
-  const { events, conn, lastEvent, openTools } = useLive();
+  const { events, conn, lastEvent, openTools, sessionNames } = useLive();
   const [windowMs, setWindowMs] = useState(3_600_000);
   const [filter, setFilter] = useState({ app: "", type: "", provider: "" });
   const [theme, setTheme] = useState(initialTheme());
@@ -119,7 +119,11 @@ export default function App() {
   // Every session's provider, from the FULL buffer (so the list is stable and
   // never collapses when one provider is selected).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const agentsAll = useMemo(() => deriveAgents(events, openTools), [events, openTools, tick]);
+  const agentsAll = useMemo(() => {
+    const agents = deriveAgents(events, openTools);
+    if (sessionNames.size) for (const a of agents) a.session_name = sessionNames.get(a.session_id) ?? null;
+    return agents;
+  }, [events, openTools, tick, sessionNames]);
   const sessionProvider = useMemo(() => {
     const map = new Map<string, string>();
     for (const a of agentsAll) if (a.model_name) map.set(a.session_id, providerOf(a.model_name));
@@ -324,7 +328,7 @@ export default function App() {
           const existing = chatResuming(s.session_id);
           const chat = existing ?? newChat(s.project_path, s.model_name || undefined, undefined, {
             sessionId: s.session_id,
-            title: s.summary?.slice(0, 40) || `${s.source_app}:${s.session_id.slice(0, 8)}`,
+            title: s.session_name ? `${s.source_app}:${s.session_name}` : (s.summary?.slice(0, 40) || `${s.source_app}:${s.session_id.slice(0, 8)}`),
           });
           setChatFocus(chat.id);
           setChatOpen(true);

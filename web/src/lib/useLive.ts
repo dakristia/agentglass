@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { WatchEvent, WsFrame, OpenToolCall } from "../../../shared/types.ts";
+import type { WatchEvent, WsFrame, OpenToolCall, SessionRollup } from "../../../shared/types.ts";
 import { WS_URL, IS_DEMO, hasToken, probeAuth } from "./api.ts";
 import * as demo from "./demo.ts";
 
@@ -19,6 +19,8 @@ export interface LiveData {
   /** Server's authoritative list of tool calls still running — seeds the
    *  per-agent "running" state for Pres that have aged out of `events`. */
   openTools: OpenToolCall[];
+  /** Session names keyed by session_id, from WS session frames. */
+  sessionNames: Map<string, string>;
 }
 
 /**
@@ -31,6 +33,7 @@ export function useLive(): LiveData {
   const [conn, setConn] = useState<ConnState>("connecting");
   const [lastEvent, setLastEvent] = useState<WatchEvent | null>(null);
   const [openTools, setOpenTools] = useState<OpenToolCall[]>([]);
+  const [sessionNames, setSessionNames] = useState<Map<string, string>>(new Map());
   const connRef = useRef(conn);
   connRef.current = conn;
   const wsRef = useRef<WebSocket | null>(null);
@@ -144,8 +147,17 @@ export function useLive(): LiveData {
               : cur
           );
         }
+      } else if (frame.type === "session") {
+        const s = frame.data as SessionRollup;
+        if (s.session_name) {
+          setSessionNames((prev) => {
+            if (prev.get(s.session_id) === s.session_name) return prev;
+            const next = new Map(prev);
+            next.set(s.session_id, s.session_name);
+            return next;
+          });
+        }
       }
-      // "session" frames are ignored — the Sessions panel fetches its own roll-ups.
     };
   }, [scheduleFlush]);
 
@@ -207,5 +219,5 @@ export function useLive(): LiveData {
     };
   }, [connect, flush]);
 
-  return { events, conn, lastEvent, openTools };
+  return { events, conn, lastEvent, openTools, sessionNames };
 }

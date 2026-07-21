@@ -176,7 +176,7 @@ function isMetaPrompt(o: Record<string, unknown>, text: string): boolean {
  */
 function lineToBodies(
   o: Record<string, unknown>,
-  ctx: { source_app: string; project_path: string; cwd: string; session_id: string; toolCalls: Map<string, { name: string; input: unknown }>; seenUsage: Set<string> },
+  ctx: { source_app: string; project_path: string; cwd: string; session_id: string; custom_title: string; toolCalls: Map<string, { name: string; input: unknown }>; seenUsage: Set<string> },
   fallbackTs: number
 ): IngestBody[] {
   const type = str(o.type);
@@ -191,6 +191,7 @@ function lineToBodies(
     source_app: ctx.source_app,
     session_id: ctx.session_id,
     model_name: model ?? undefined,
+    session_name: ctx.custom_title || undefined,
   };
   // Shared payload bits so every event carries where it came from — this is
   // what the folder filter and the project column read.
@@ -341,15 +342,16 @@ async function ingestFile(
   // after the agent while reporting the *parent* session it belongs to.
   let project_path = "";
   let session_id = "";
+  let custom_title = "";
   for (const line of lines) {
     if (!line) continue;
-    if (!line.includes('"cwd"') && !line.includes('"sessionId"')) continue;
+    if (!line.includes('"cwd"') && !line.includes('"sessionId"') && !line.includes('"customTitle"')) continue;
     try {
       const o = JSON.parse(line) as Record<string, unknown>;
       project_path ||= str(o.cwd) ?? "";
       session_id ||= str(o.sessionId) ?? "";
+      if (o.type === "custom-title" && typeof o.customTitle === "string" && o.customTitle.trim()) custom_title = o.customTitle.trim();
     } catch { /* skip malformed line */ }
-    if (project_path && session_id) break;
   }
   session_id ||= fallbackSessionId;
   const cwd = project_path;
@@ -380,7 +382,7 @@ async function ingestFile(
     source_app = fallbackSessionId.slice(0, 8);
   }
 
-  const ctx = { source_app, project_path, cwd, session_id, toolCalls, seenUsage };
+  const ctx = { source_app, project_path, cwd, session_id, custom_title, toolCalls, seenUsage };
   let ingested = 0;
   let seen = 0;
   // Collected inside the transaction, delivered after it commits: broadcasting
@@ -401,6 +403,9 @@ async function ingestFile(
         continue;
       }
       const bodies = lineToBodies(o, ctx, fileMtime);
+      if (o.type === "custom-title" && typeof o.customTitle === "string" && o.customTitle.trim()) {
+        ctx.custom_title = o.customTitle.trim();
+      }
       if (i < from) continue; // already ingested — parsed only for tool names
       for (const body of bodies) {
         emitted.push(insertEvent(normalize(body)));

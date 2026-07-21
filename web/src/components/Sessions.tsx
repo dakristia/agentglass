@@ -33,7 +33,7 @@ export const Sessions = memo(function Sessions({ provider = "" }: { provider?: s
           return (
             <div key={s.session_id} className="flex items-center gap-2 text-[11px]">
               <div className="w-24 shrink-0 truncate t-dim2" title={s.session_id}>
-                {s.source_app}:{s.session_id.slice(0, 5)}
+                {s.session_name ? `${s.source_app}:${s.session_name}` : `${s.source_app}:${s.session_id.slice(0, 5)}`}
               </div>
               <div className="flex-1 relative h-5 rounded" style={{ background: "color-mix(in srgb, var(--border) 22%, transparent)" }}>
                 <motion.div
