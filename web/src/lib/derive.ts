@@ -194,7 +194,7 @@ export function deriveAgents(events: WatchEvent[], openTools: OpenToolCall[] = [
     // a long build emits no events while it runs, and reading that silence as
     // idle is exactly the slow-vs-hung false positive to avoid.
     if ((since >= IDLE_MS && !running) || a.lastType === "Stop" || a.lastType === "SessionEnd") a.status = "idle";
-    else if (a.lastType === "PermissionRequest" || a.lastType === "Notification") a.status = "waiting";
+    else if (a.lastType === "PermissionRequest" && !running) a.status = "waiting";
     // Errored only on a RECENT error, not a lifetime count — one transient
     // failure early shouldn't paint a now-healthy agent red for its whole run.
     else if (now - a.lastErrorTs < STALL_MS) a.status = "errored";
