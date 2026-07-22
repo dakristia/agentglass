@@ -8,7 +8,7 @@ import { fmtUsd, fmtTokens, modelColor } from "../lib/format.ts";
 type View = "model" | "repo";
 type Item = { key: string; label: string; color: string; cost: number; tokens: number };
 
-const repoName = (p: string) => p.split("/").pop() || p;
+const repoName = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() || p;
 
 export const CostByModel = memo(function CostByModel({ stats }: { stats: StatsSummary | null }) {
   const [view, setView] = useState<View>("model");
