@@ -49,7 +49,7 @@ export const CostByModel = memo(function CostByModel({ stats }: { stats: StatsSu
 
   return (
     <Panel eyebrow="Cost" title="Where the money goes" right={toggle}>
-      <div className="flex gap-4 h-full items-center">
+      <div className="flex gap-4 h-full items-center overflow-hidden">
         <div className="relative h-36 w-36 shrink-0">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
@@ -89,7 +89,7 @@ export const CostByModel = memo(function CostByModel({ stats }: { stats: StatsSu
             )}
           </div>
         </div>
-        <div className="flex-1 min-w-0 space-y-1.5">
+        <div className="flex-1 min-w-0 space-y-1.5 max-h-full overflow-y-auto pr-1">
           {items.length === 0 && <div className="t-dim2 text-[11px]">no token usage yet</div>}
           {items.map((m, i) => (
             <motion.div
