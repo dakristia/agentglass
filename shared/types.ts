@@ -184,6 +184,7 @@ export interface PendingGate {
   id: string;
   source_app: string;
   session_id: string;
+  session_name?: string | null;
   tool_name: string;
   summary: string;
   created: number;
@@ -208,7 +209,7 @@ export interface Insight {
   kind: "loop" | "spend" | "errors" | "burn";
   title: string;
   detail: string;
-  session: string | null; // "source_app:session8"
+  session: string | null;
   ts: number;
 }
 

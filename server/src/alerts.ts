@@ -3,6 +3,7 @@
 //   AGENTGLASS_WEBHOOK   — POST {text} to this URL (Slack/Discord-compatible)
 //   AGENTGLASS_NOTIFY=1  — run `notify-send` (Linux desktop) if available
 import type { WatchEvent } from "../../shared/types.ts";
+import { sessionNameOf } from "./db.ts";
 
 const WEBHOOK = process.env.AGENTGLASS_WEBHOOK;
 const DESKTOP = process.env.AGENTGLASS_NOTIFY === "1";
@@ -40,6 +41,12 @@ async function deliver(title: string, body: string) {
   }
 }
 
+/** Build a display label: repo:session_name if available, else repo:session_id(8). */
+const agentLabel = (e: { source_app: string; session_id: string }) => {
+  const name = sessionNameOf(e.session_id);
+  return name ? `${e.source_app}:${name}` : `${e.source_app}:${e.session_id.slice(0, 8)}`;
+};
+
 /** A tool call is being held at the control-plane gate — ping the human. */
 export function pushGate(agent: string, tool: string, summary: string) {
   if (shouldSend(`gate:${agent}:${summary}`))
@@ -48,7 +55,9 @@ export function pushGate(agent: string, tool: string, summary: string) {
 
 /** Inspect an event and fire an alert if it warrants one. */
 export function maybeAlert(e: WatchEvent) {
-  const agent = `${e.source_app}:${e.session_id.slice(0, 8)}`;
+  const isRelevant = e.hook_event_type === "PermissionRequest" || e.hook_event_type === "Notification" || e.is_error;
+  if (!isRelevant) return;
+  const agent = agentLabel(e);
 
   if (e.hook_event_type === "PermissionRequest") {
     if (shouldSend(`perm:${e.session_id}`))

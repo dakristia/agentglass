@@ -18,7 +18,7 @@ import { ToolRow } from "./ToolRow.tsx";
 import { fmtTime } from "../lib/format.ts";
 import { Select } from "./Select.tsx";
 import { SCROLLBAR_CSS, CODE_FONT_STYLE } from "./ChangesModal.tsx";
-import { fmtAgo, fmtUsd, modelLabelOf, modelColor, providerOf } from "../lib/format.ts";
+import { fmtAgo, fmtUsd, modelLabelOf, modelColor, providerOf, agentLabel } from "../lib/format.ts";
 import { sessionIsLive } from "../lib/derive.ts";
 import {
   listChats, getChat, newChat, closeChat, update, send, stop, subscribe, chatResuming,
@@ -375,7 +375,7 @@ export function ChatPanel({ open, onClose, focusId }: { open: boolean; onClose: 
     const chat = chatResuming(s.session_id)
       ?? newChat(s.project_path, s.model_name || undefined, active?.mode ?? DEFAULT_MODE, {
         sessionId: s.session_id,
-        title: s.session_name ? `${s.source_app}:${s.session_name}` : `${s.source_app}:${s.session_id.slice(0, 8)}`,
+        title: agentLabel(s),
       });
     setActiveId(chat.id);
     requestAnimationFrame(() => inputRef.current?.focus());

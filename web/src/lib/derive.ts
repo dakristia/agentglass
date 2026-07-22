@@ -1,5 +1,5 @@
 import type { WatchEvent, OpenToolCall } from "../../../shared/types.ts";
-import { agentKey, fmtMs } from "./format.ts";
+import { agentKey, agentLabel, fmtMs } from "./format.ts";
 
 export type AgentStatus = "working" | "waiting" | "errored" | "idle";
 
@@ -231,17 +231,17 @@ export function deriveAlerts(agents: AgentCard[]): Alert[] {
   const out: Alert[] = [];
   for (const a of agents) {
     if (a.status === "waiting")
-      out.push({ id: "wait:" + a.key, level: "warn", agent: a.key, text: "waiting for approval / input", ts: a.lastSeen });
+      out.push({ id: "wait:" + a.key, level: "warn", agent: agentLabel(a), text: "waiting for approval / input", ts: a.lastSeen });
     if (a.status === "errored")
-      out.push({ id: "err:" + a.key, level: "error", agent: a.key, text: `${a.errors} error(s) — last action ${a.lastAction}`, ts: a.lastSeen });
+      out.push({ id: "err:" + a.key, level: "error", agent: agentLabel(a), text: `${a.errors} error(s) — last action ${a.lastAction}`, ts: a.lastSeen });
     // A tool call open this long deserves eyes: could be a fat build, could be
     // a hang — the alert says which tool and for how long, and the user knows
     // which of the two their project makes plausible.
     if (a.status === "working" && a.runningTool && now - a.runningSince >= TOOL_RUN_WARN_MS)
-      out.push({ id: "long:" + a.key, level: "warn", agent: a.key, text: `${a.runningTool} running for ${fmtMs(now - a.runningSince)} — long job or stuck?`, ts: a.runningSince });
+      out.push({ id: "long:" + a.key, level: "warn", agent: agentLabel(a), text: `${a.runningTool} running for ${fmtMs(now - a.runningSince)} — long job or stuck?`, ts: a.runningSince });
     const rate = a.tools > 3 ? a.errors / a.tools : 0;
     if (rate > 0.25)
-      out.push({ id: "rate:" + a.key, level: "error", agent: a.key, text: `high failure rate ${(rate * 100).toFixed(0)}%`, ts: a.lastSeen });
+      out.push({ id: "rate:" + a.key, level: "error", agent: agentLabel(a), text: `high failure rate ${(rate * 100).toFixed(0)}%`, ts: a.lastSeen });
   }
   return out.sort((x, y) => y.ts - x.ts);
 }

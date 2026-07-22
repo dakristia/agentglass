@@ -3,7 +3,7 @@ import { motion } from "motion/react";
 import type { SessionRollup } from "../../../shared/types.ts";
 import { api } from "../lib/api.ts";
 import { Panel } from "./Panel.tsx";
-import { fmtUsd, fmtMs, fmtTokens, modelColor, modelLabelOf } from "../lib/format.ts";
+import { fmtUsd, fmtMs, fmtTokens, modelColor, modelLabelOf, agentLabel } from "../lib/format.ts";
 
 export const Sessions = memo(function Sessions({ provider = "" }: { provider?: string }) {
   const [sessions, setSessions] = useState<SessionRollup[]>([]);
@@ -33,7 +33,7 @@ export const Sessions = memo(function Sessions({ provider = "" }: { provider?: s
           return (
             <div key={s.session_id} className="flex items-center gap-2 text-[11px]">
               <div className="w-24 shrink-0 truncate t-dim2" title={s.session_id}>
-                {s.session_name ? `${s.source_app}:${s.session_name}` : `${s.source_app}:${s.session_id.slice(0, 5)}`}
+                {agentLabel(s)}
               </div>
               <div className="flex-1 relative h-5 rounded" style={{ background: "color-mix(in srgb, var(--border) 22%, transparent)" }}>
                 <motion.div

@@ -4,7 +4,7 @@ import type { Alert } from "../lib/derive.ts";
 import type { Insight, PendingGate } from "../../../shared/types.ts";
 import { Panel } from "./Panel.tsx";
 import { api } from "../lib/api.ts";
-import { fmtAgo } from "../lib/format.ts";
+import { fmtAgo, agentLabel } from "../lib/format.ts";
 
 const LEVEL: Record<Alert["level"], { color: string; icon: string }> = {
   error: { color: "var(--error)", icon: "✕" },
@@ -78,7 +78,7 @@ export function Alerts({ alerts, onSelectApp, bump }: { alerts: Alert[]; onSelec
               <div className="flex items-center gap-2">
                 <span style={{ color: "var(--warning)" }}>✋</span>
                 <span className="text-[11.5px] font-semibold" style={{ color: "var(--text)" }}>Approve {g.tool_name}?</span>
-                <span className="ml-auto text-[9.5px] t-dim2">{g.source_app}:{g.session_id.slice(0, 8)}</span>
+                <span className="ml-auto text-[9.5px] t-dim2">{agentLabel(g)}</span>
               </div>
               <div className="text-[10.5px] t-dim mt-1 mb-2 break-all line-clamp-2" title={g.summary} style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
                 {g.summary || "(no details)"}

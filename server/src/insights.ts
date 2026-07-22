@@ -2,9 +2,12 @@
 // runaway loops, fast burn, high failure rates, overall spend velocity.
 // Computed from the full event history (better than the live buffer for loops).
 import type { Insight } from "../../shared/types.ts";
-import { db } from "./db.ts";
+import { db, sessionNameOf } from "./db.ts";
 
-const key = (app: string, sid: string) => `${app}:${sid.slice(0, 8)}`;
+const label = (app: string, sid: string) => {
+  const name = sessionNameOf(sid);
+  return name ? `${app}:${name}` : `${app}:${sid.slice(0, 8)}`;
+};
 const trim = (s: string, n = 64) => (s.length > n ? s.slice(0, n) + "…" : s);
 
 export function getInsights(): Insight[] {
@@ -32,7 +35,7 @@ export function getInsights(): Insight[] {
       kind: "loop",
       title: `Possible loop · ${l.n}× identical command`,
       detail: trim(String(l.cmd).replace(/\s+/g, " ")),
-      session: key(l.source_app, l.session_id),
+      session: label(l.source_app, l.session_id),
       ts: l.last,
     });
   }
@@ -52,7 +55,7 @@ export function getInsights(): Insight[] {
       kind: "spend",
       title: `Burning fast · $${s.cost.toFixed(2)} in 15m`,
       detail: "this session is spending quickly",
-      session: key(s.source_app, s.session_id),
+      session: label(s.source_app, s.session_id),
       ts: s.last,
     });
   }
@@ -76,7 +79,7 @@ export function getInsights(): Insight[] {
       kind: "errors",
       title: `High failure rate · ${pct}%`,
       detail: `${f.errs} of ${f.tools} tool calls failed`,
-      session: key(f.source_app, f.session_id),
+      session: label(f.source_app, f.session_id),
       ts: f.last,
     });
   }

@@ -3,7 +3,7 @@ import type { WatchEvent } from "../../shared/types.ts";
 import { useLive } from "./lib/useLive.ts";
 import { useStats } from "./lib/useStats.ts";
 import { deriveAgents, deriveAlerts } from "./lib/derive.ts";
-import { providerOf } from "./lib/format.ts";
+import { providerOf, agentLabel } from "./lib/format.ts";
 import { api, IS_DEMO } from "./lib/api.ts";
 import { initialTheme, applyTheme } from "./lib/themes.ts";
 import { useAlertSound } from "./lib/useSound.ts";
@@ -328,7 +328,7 @@ export default function App() {
           const existing = chatResuming(s.session_id);
           const chat = existing ?? newChat(s.project_path, s.model_name || undefined, undefined, {
             sessionId: s.session_id,
-            title: s.session_name ? `${s.source_app}:${s.session_name}` : (s.summary?.slice(0, 40) || `${s.source_app}:${s.session_id.slice(0, 8)}`),
+            title: s.session_name ? agentLabel(s) : (s.summary?.slice(0, 40) || agentLabel(s)),
           });
           setChatFocus(chat.id);
           setChatOpen(true);

@@ -1065,4 +1065,12 @@ export function exportRows(limit = 100_000): WatchEvent[] {
     .map(parseEventRow);
 }
 
+const sessionNameStmt = db.query<{ session_name: string | null }, [string]>(
+  "SELECT session_name FROM sessions WHERE session_id = ?"
+);
+
+export function sessionNameOf(sessionId: string): string | null {
+  return sessionNameStmt.get(sessionId)?.session_name ?? null;
+}
+
 export { db };

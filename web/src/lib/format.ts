@@ -49,6 +49,9 @@ export const fmtTime = (ts: number) =>
 export const agentKey = (e: { source_app: string; session_id: string }) =>
   `${e.source_app}:${e.session_id}`;
 
+export const agentLabel = (e: { source_app: string; session_id: string; session_name?: string | null }) =>
+  e.session_name ? `${e.source_app}:${e.session_name}` : `${e.source_app}:${e.session_id.slice(0, 8)}`;
+
 // Deterministic color from a string (agent lanes, model chips).
 export function hashColor(s: string): string {
   let h = 0;

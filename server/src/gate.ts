@@ -6,6 +6,7 @@
 // is unreachable — the control plane never blocks agents by accident.
 import type { PendingGate } from "../../shared/types.ts";
 import { pushGate } from "./alerts.ts";
+import { sessionNameOf } from "./db.ts";
 export type GateDecision = "allow" | "deny";
 
 interface Waiter extends PendingGate {
@@ -40,6 +41,7 @@ export function submitGate(
   const wait = Math.max(1000, Math.min(GATE_MAX_MS, Number.isFinite(timeoutMs) ? timeoutMs : 60_000));
   return new Promise((resolve) => {
     const id = crypto.randomUUID();
+    const session_name = sessionNameOf(req.session_id);
     const timer = setTimeout(() => {
       waiters.delete(id);
       onChange();
@@ -52,8 +54,9 @@ export function submitGate(
       // skip the human it was meant to ask.
       resolve({ decision: "allow", reason: "" });
     }, wait);
-    waiters.set(id, { id, ...req, created: Date.now(), resolve, timer });
-    pushGate(`${req.source_app}:${req.session_id.slice(0, 8)}`, req.tool_name, req.summary);
+    waiters.set(id, { id, ...req, session_name, created: Date.now(), resolve, timer });
+    const agentLabel = session_name ? `${req.source_app}:${session_name}` : `${req.source_app}:${req.session_id.slice(0, 8)}`;
+    pushGate(agentLabel, req.tool_name, req.summary);
     onChange();
   });
 }
@@ -70,6 +73,6 @@ export function decideGate(id: string, decision: GateDecision, reason: string): 
 
 export function pendingGates(): PendingGate[] {
   return [...waiters.values()]
-    .map(({ id, source_app, session_id, tool_name, summary, created }) => ({ id, source_app, session_id, tool_name, summary, created }))
+    .map(({ id, source_app, session_id, session_name, tool_name, summary, created }) => ({ id, source_app, session_id, session_name, tool_name, summary, created }))
     .sort((a, b) => a.created - b.created);
 }

@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import type { AgentCard } from "../lib/derive.ts";
 import { Panel } from "./Panel.tsx";
-import { fmtUsd, fmtTokens, fmtAgo, modelLabelOf } from "../lib/format.ts";
+import { fmtUsd, fmtTokens, fmtAgo, modelLabelOf, agentLabel } from "../lib/format.ts";
 
 // "now ago" reads wrong — fmtAgo already returns "now" for the freshest events.
 const ago = (ts: number) => {
@@ -50,7 +50,7 @@ function SessionCard({ a, selected, onSelect }: { a: AgentCard; selected: boolea
       setTimeout(() => setCopied(false), 1500);
     });
   }, [a.session_id]);
-  const label = a.session_name ? `${a.source_app}:${a.session_name}` : `${a.source_app}:${a.session_id.slice(0, 8)}`;
+  const label = agentLabel(a);
   return (
     <motion.div
       onClick={() => onSelect?.(a)}
