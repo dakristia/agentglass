@@ -24,6 +24,9 @@ export interface AgentCard {
   subagents: number;
   /** Subagent type → count, most common first (e.g. Explore, workflow-subagent). */
   subagentTypes: [string, number][];
+  /** Key of the parent session this one is a subagent of, when known. Null
+   *  for main sessions and for subagents whose parent couldn't be resolved. */
+  parentKey: string | null;
   /** A tool call that started (PreToolUse) and hasn't reported back yet. */
   runningTool: string | null;
   runningSince: number;
@@ -74,6 +77,7 @@ function blankCard(key: string, source_app: string, session_id: string, model_na
     spark: new Array(20).fill(0),
     subagents: 0,
     subagentTypes: [],
+    parentKey: null,
     runningTool: null,
     runningSince: 0,
     ctxTokens: 0,
@@ -92,6 +96,12 @@ export function deriveAgents(events: WatchEvent[], openTools: OpenToolCall[] = [
   // Subagents fold into their parent session_id but carry agent_id/agent_type,
   // so track the distinct subagents (and their kinds) seen per session.
   const subs = new Map<string, Map<string, string>>(); // key → (agent_id → agent_type)
+  // SubagentStart events tell us which session spawned which agent_id —
+  // the link we need to nest a subagent card under its parent.
+  const spawnMap = new Map<string, string>(); // agent_id → parent card key
+  // Track per-card how many events carry agent_id vs total, so we can
+  // identify sessions that are purely subagent work.
+  const hasMainEvent = new Set<string>(); // keys that have ≥1 event WITHOUT agent_id
 
   // Finished-tool lookups, so an open PreToolUse can be told apart from one
   // whose Post already landed (same pairing the feed does). A quiet session
@@ -132,10 +142,15 @@ export function deriveAgents(events: WatchEvent[], openTools: OpenToolCall[] = [
     if (e.agent_id) {
       let m = subs.get(key);
       if (!m) subs.set(key, (m = new Map()));
-      // Don't let a later type-less event downgrade a known subagent type
-      // (inner tool events don't re-carry it) back to the generic fallback.
       const prev = m.get(e.agent_id);
       if (e.agent_type || !prev) m.set(e.agent_id, e.agent_type || prev || "subagent");
+    } else {
+      hasMainEvent.add(key);
+    }
+    // A SubagentStart in one session records which agent_id it spawned —
+    // that's the parent→child link for sessions that have their own session_id.
+    if (e.hook_event_type === "SubagentStart" && e.agent_id) {
+      spawnMap.set(e.agent_id, key);
     }
     a.events++;
     if (e.hook_event_type === "PostToolUse" || e.hook_event_type === "PostToolUseFailure") a.tools++;
@@ -213,6 +228,33 @@ export function deriveAgents(events: WatchEvent[], openTools: OpenToolCall[] = [
       for (const type of m.values()) byType.set(type, (byType.get(type) ?? 0) + 1);
       a.subagentTypes = [...byType.entries()].sort((x, y) => y[1] - x[1]);
     }
+  }
+
+  // Parent-linking pass: sessions that are purely subagent work (no main-thread
+  // events) get linked to the session that spawned them via SubagentStart.
+  // This lets the Fleet nest them compactly under their parent instead of
+  // showing them as standalone cards.
+  for (const a of map.values()) {
+    if (hasMainEvent.has(a.key)) continue;
+    // Collect the agent_ids this card carries — they came from events in
+    // this subagent session.
+    const subMap = subs.get(a.key);
+    if (!subMap) continue;
+    // Find the parent: whichever session had a SubagentStart for one of
+    // these agent_ids. Pick the most recent if there are multiple candidates.
+    let bestKey: string | null = null;
+    let bestTs = 0;
+    for (const aid of subMap.keys()) {
+      const pk = spawnMap.get(aid);
+      if (pk && pk !== a.key) {
+        const parent = map.get(pk);
+        if (parent && parent.lastSeen > bestTs) {
+          bestKey = pk;
+          bestTs = parent.lastSeen;
+        }
+      }
+    }
+    if (bestKey) a.parentKey = bestKey;
   }
 
   return [...map.values()].sort((a, b) => b.lastSeen - a.lastSeen);
